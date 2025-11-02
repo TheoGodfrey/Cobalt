@@ -98,7 +98,7 @@ class MissionController:
                         self.mission_state, 
                         self.flight_controller  # The HAL is passed in as flight_controller
                     )
-                    await behavior.run()
+                    await behavior.start()
                 
                 # Evaluate transitions
                 # Bug #5: wait_for_trigger is unimplemented and will hang
@@ -207,9 +207,10 @@ class MissionController:
             tasks.append(event_task)
         
         # Monitor mission state changes
+# Monitor mission state changes
         if state_triggers:
             state_task = asyncio.create_task(
-                self._monitor_state_changes(state_triggers),
+                self._monitor_state_changes(state_triggers, self.mission_state), # <-- Pass self.mission_state
                 name="monitor_states"
             )
             tasks.append(state_task)
@@ -297,17 +298,26 @@ class MissionController:
                         return trigger_key
             await asyncio.sleep(0.1)
     
-    async def _monitor_state_changes(self, state_triggers: list) -> str:
+    async def _monitor_state_changes(self, state_triggers: list, mission_state: MissionState) -> str:
         """
         Monitors MissionState for state changes.
         
         Args:
             state_triggers: List of (trigger_key, state_name) tuples
+            mission_state: The current mission state object
             
         Returns:
             The trigger_key that fired
         """
         print(f"[MissionController] Monitoring for state changes: {[s[1] for s in state_triggers]}")
+
+        # --- FIX: First, check if the state is ALREADY correct ---
+        current_state_name = mission_state.current.name.upper()
+        for trigger_key, expected_state in state_triggers:
+            if current_state_name == expected_state.upper():
+                print(f"[MissionController] State trigger '{trigger_key}' is already active.")
+                return trigger_key
+        # --- End of FIX ---
         
         # Create a future that resolves when the state changes
         state_future = asyncio.Future()
@@ -333,7 +343,7 @@ class MissionController:
             self.mission_state.remove_listener(state_listener)
             if state_listener in self._state_listeners:
                 self._state_listeners.remove(state_listener)
-    
+                
     async def _wait_timeout(self, trigger_key: str, timeout_seconds: float) -> str:
         """
         Waits for a specified timeout and returns the trigger.

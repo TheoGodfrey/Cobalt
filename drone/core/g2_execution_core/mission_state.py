@@ -89,7 +89,8 @@ def get_mission_transitions() -> Dict[MissionStateEnum, Set[MissionStateEnum]]:
         },
         MissionStateEnum.CONFIRMING: {
             MissionStateEnum.SEARCHING, 
-            MissionStateEnum.DELIVERING
+            MissionStateEnum.DELIVERING,
+            MissionStateEnum.RETURNING
         },
         MissionStateEnum.DELIVERING: {
             MissionStateEnum.SEARCHING, 

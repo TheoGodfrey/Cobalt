@@ -220,7 +220,13 @@ class RTHBehavior(BaseBehavior):
         
         await self.hal.goto(home_waypoint)
         
-        print("[RTHBehavior] Arrived at Hub.")
+        print("[RTHBehavior] Arrived at Hub. Now landing...")
+        
+        # --- FIX: Actually call the land function ---
+        await self.hal.land()
+        # --- End of Fix ---
+        
+        print("[RTHBehavior] Landed.")
         self.mission_state.transition(MissionStateEnum.LANDING)
 
 # Add other behaviors as needed (Patrol, Standby, etc.)
