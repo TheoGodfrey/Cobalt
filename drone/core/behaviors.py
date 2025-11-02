@@ -1,75 +1,76 @@
 """
-Reusable asynchronous mission behaviors
-(Refactored for async, AI/Tracker, and Geolocation)
+L4: Reusable asynchronous mission behaviors (The "Actor").
 """
 import asyncio
 import time
 from .position import Position
 from .drone import Drone, Telemetry
 from .cameras.dual_camera import DualCameraSystem
-from .detection.fusion_detector import FusionDetector
-# --- FIX: Import specific configs ---
-from .config_models import Settings, PrecisionHoverConfig, CameraIntrinsicsConfig
+# --- L3/L6/L8 Imports ---
+from .detection.fusion_detector import FusionDetector # L6 Detector
+from .detection.thermal_detector import ThermalDetector # L6 Detector
+from .actuators import BaseActuator, get_actuator # L8 Actuator
+from .config_models import Settings, PrecisionHoverConfig
+# ------------------------
 from typing import List, Tuple
 from .cameras.base import Detection
-from .navigation import CameraIntrinsics, image_to_world_position
+from .navigation import CameraIntrinsicsHelper, image_to_world_position
 
 class SearchBehavior:
-    """Encapsulates search behavior with dual camera and fusion tracker."""
+    """L4: Encapsulates search behavior with pluggable Tools."""
     
     def __init__(self, 
                  drone: Drone, 
                  dual_camera: DualCameraSystem,
-                 search_strategy, 
-                 flight_strategy, 
+                 search_strategy,       # L7 Strategy (Legs)
+                 flight_strategy,       # L7 Strategy (Legs)
                  config: Settings,
-                 mqtt: "MqttClient", # <-- FIX
-                 logger: "MissionLogger"): # <-- FIX
+                 mqtt: "MqttClient", 
+                 logger: "MissionLogger",
+                 detector_name: str     # L6 Detector Tool Name (Eyes)
+                 ):
         
         self.drone = drone
         self.dual_camera = dual_camera
         self.search_strategy = search_strategy
         self.flight_strategy = flight_strategy
         self.config = config
-        self.mqtt = mqtt # <-- FIX
-        self.logger = logger # <-- FIX
+        self.mqtt = mqtt 
+        self.logger = logger 
         self.iteration = 0
         
-        self.detector = FusionDetector(config.detection)
-        
-        # --- FIX: Correctly access intrinsics from *visual* camera ---
-        self.intrinsics = CameraIntrinsics(config.cameras.visual.intrinsics)
-        # -------------------------------------------------------------
-        
+        # --- L6: Initialize the specific Detector Tool (Eyes) ---
+        if detector_name == "fusion_detector":
+             self.detector = FusionDetector(config.detection)
+        elif detector_name == "thermal_threshold":
+             self.detector = ThermalDetector(config.detection.thermal)
+        else:
+             self.detector = FusionDetector(config.detection) # Fallback
+
+        self.intrinsics = CameraIntrinsicsHelper(config.cameras.visual.intrinsics)
         self.last_detections: List[Detection] = []
     
     async def search_step(self) -> Tuple[bool, Detection | None]:
         """
         Execute one asynchronous search step.
-        This is now a *passive scan* commanded by the Coordinator.
         Returns: (should_continue, confirmed_detection_or_none)
         """
         
-        # --- FIX: This is now a passive scan loop ---
-        # The drone no longer moves itself during 'SEARCHING'
-        # It just scans at its current location.
-        # The Coordinator's AI tells it where to go via GOTO_WAYPOINT commands.
         self.logger.log(f"Scanning at {self.drone.telemetry.position}...", "debug")
         
         # 1. Capture synchronized frame
         dual_frame = await self.dual_camera.capture_synchronized()
         
-        # 2. Get latest telemetry
+        # 2. Get latest telemetry (L10 Vehicle State)
         current_telemetry = self.drone.telemetry
         
-        # 3. Detect
+        # 3. L6 Detect
         confirmed_detections = await self.detector.detect(dual_frame)
         self.last_detections = confirmed_detections
         
         self.iteration += 1
         
-        # 4. Report *raw* detections to Coordinator's AI
-        # This feeds the probabilistic map
+        # 4. Report raw detections to Coordinator's AI
         if confirmed_detections:
             best_detection = max(confirmed_detections, key=lambda d: d.confidence)
             
@@ -87,20 +88,16 @@ class SearchBehavior:
                 }
             })
             
-            # --- FIX: Check if this detection is a *confirmed* target ---
-            # This logic is now simplified: if the tracker has high confidence,
-            # we ask the operator to confirm.
+            # 5. Check for confirmed target
             if best_detection.confidence > self.config.detection.fusion.fusion_threshold:
-                 # Return the detection to trigger 'target_sighted'
                  return True, best_detection
 
-        # 5. Check for max iterations
+        # 6. Check for max iterations
         max_iter = self.config.mission.max_search_iterations
         if self.iteration >= max_iter:
             return False, None # Search complete (timeout)
         
-        return True, None  # Keep searching
-        # -------------------------------------------
+        return True, None  
     
     def get_last_detections(self) -> List[Detection]:
         return self.last_detections
@@ -108,41 +105,41 @@ class SearchBehavior:
     def _image_to_world_position(self, 
                                  image_pos: tuple, 
                                  drone_telemetry: Telemetry) -> Position:
-        """
-        Wrapper for the real geolocation function.
-        """
+        """Wrapper for the real geolocation function."""
         return image_to_world_position(
             pixel=image_pos,
             drone_telemetry=drone_telemetry,
             intrinsics=self.intrinsics
-            # ground_level_z can be passed from config if needed
         )
 
 class DeliveryBehavior:
-    """Encapsulates payload delivery with LED signaling."""
+    """L4: Encapsulates payload delivery with pluggable Tools."""
     
-    # --- FIX: Correctly accept PrecisionHoverConfig ---
-    def __init__(self, drone: Drone, flight_strategy, config: PrecisionHoverConfig):
+    def __init__(self, 
+                 drone: Drone, 
+                 flight_strategy, 
+                 config: PrecisionHoverConfig,
+                 actuator_name: str,       # L8 Actuator Tool Name (Hands)
+                 logger: "MissionLogger"
+                 ):
         self.drone = drone
         self.flight_strategy = flight_strategy
-        self.config = config # This is now the PrecisionHoverConfig
-    # -------------------------------------------------
+        self.config = config 
+        self.logger = logger
+        
+        # --- L8: Initialize the specific Actuator Tool (Hands) ---
+        self.actuator_tool: BaseActuator = get_actuator(actuator_name)
     
-    async def deliver_to(self, target_position: Position):
-        """Deliver payload to target with LED signaling."""
-        await self.drone.set_led("red")
+    async def run(self, target_position: Position):
+        """Run the full delivery phase."""
         
-        # --- FIX: Access config directly ---
-        delivery_position = Position(
-             target_position.x, 
-             target_position.y,
-             target_position.z + self.config.altitude_offset
-        )
-        # -----------------------------------
+        # 1. Calculate approach position using L7 Strategy
+        delivery_position = self.flight_strategy.get_next_position(self.drone, target_position)
         
+        self.logger.log(f"Flying to delivery point: {delivery_position}", "info")
         await self.drone.go_to(delivery_position)
-        await self.drone.hover()
-        await asyncio.sleep(1.0)
-        await self.drone.set_led("green")
-        await asyncio.sleep(2.0)
-
+        
+        # 2. L8 Perform the action using the configured Actuator Tool
+        await self.actuator_tool.perform_action(self.drone, params={"duration_s": 2.0})
+        
+        self.logger.log("Delivery Actuator action complete.", "info")

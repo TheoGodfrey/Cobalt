@@ -24,7 +24,7 @@ if str(CORE_PATH) not in sys.path:
 
 from drone.core.config_models import Settings
 from drone.core.comms import MqttClient
-from coordinator.hub.gcs_server import GcsServer
+from hub.gcs_server import GcsServer
 from satellite_relay import SatelliteRelay
 
 def load_config(config_path: str = "v_0_2/scout_drone/config/mission_config.yaml") -> Settings:

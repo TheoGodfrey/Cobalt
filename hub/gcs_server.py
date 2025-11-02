@@ -19,9 +19,9 @@ if str(CORE_PATH) not in sys.path:
     sys.path.append(str(CORE_PATH))
 # --- End Import Logic ---
 
-from core.config_models import GcsConfig  # <-- FIX: Corrected import
-from core.drone import Telemetry         # <-- FIX: Corrected import
-from core.position import Position       # <-- FIX: Added missing import
+from drone.core.config_models import GcsConfig  # <-- FIX: Corrected import
+from drone.core.drone import Telemetry         # <-- FIX: Corrected import
+from drone.core.position import Position       # <-- FIX: Added missing import
 
 # Forward declaration for type hinting
 if TYPE_CHECKING:

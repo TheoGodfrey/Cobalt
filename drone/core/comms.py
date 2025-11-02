@@ -39,6 +39,8 @@ class MqttClient:
             print(f"[{self.client_id} MQTT] Failed to connect: {reason_code}")
             self.is_connected = False
 
+
+
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
         """Paho callback for when disconnected."""
         print(f"[{self.client_id} MQTT] Disconnected with reason: {reason_code}")
@@ -56,10 +58,22 @@ class MqttClient:
         except Exception as e:
             print(f"[{self.client_id} MQTT] Error in on_message: {e}")
 
-    async def connect(self):
-        """Asynchronously connect to the MQTT broker."""
+    async def connect(self, will_topic: str | None = None, will_payload: str | None = None): 
+        """Asynchronously connect to the MQTT broker, optionally setting LWT."""
         print(f"[{self.client_id} MQTT] Attempting connection to {self.config.host}...")
         try:
+            
+            # --- NEW LWT LOGIC for Hub Resilience ---
+            if will_topic and will_payload:
+                print(f"[{self.client_id} MQTT] Setting Last Will: {will_topic}={will_payload}")
+                self._client.will_set(
+                    f"{self.config.base_topic}/{will_topic}",
+                    will_payload,
+                    qos=1,
+                    retain=True
+                )
+            # ----------------------------------------
+            
             self._client.connect(self.config.host, self.config.port, 60)
             self._client.loop_start() # Starts Paho's network thread
             

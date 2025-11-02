@@ -3,9 +3,10 @@ Asynchronous, event-driven, P2P mission controller.
 (Refactored for COBALT P2P Architecture)
 
 This file is based on the original `mission.py` from the `drone-mob` repository
-
+[cite: theogodfrey/drone-mob/Drone-MOB-ca18888baa3e251f77acf01f881b5934e4ab4e7f/v_0.2/scout_drone/core/mission.py]
 and has been significantly modified to implement the decentralized P2P architecture
-described in the "Cobalt drone" document.
+described in the "Cobalt drone" document [cite: Cobalt drone] and the
+distributed AI search from the patent [cite: patent_1_probabilistic_search_delivery_improved.md].
 """
 
 import asyncio
@@ -34,7 +35,11 @@ class MissionController:
     Asynchronous mission controller for a *single* drone.
     This class *is* the model for the state machine.
     It now listens for fleet-wide P2P events and decides how to act
-    based on its configured role, as described in.
+    based on its configured role, as described in [cite: Cobalt drone].
+    
+    It maintains its own local copy of the probabilistic map and updates
+    it based on its own actions and "gossip" messages from the fleet
+    [cite: patent_1_probabilistic_search_delivery_improved.md].
     """
     
     def __init__(self, 
@@ -83,16 +88,17 @@ class MissionController:
             config=config.precision_hover
         )
         
-        # --- NEW: AI Logic for SCOUT drone ---
-        # As discussed, the drone runs its own compute for this.
-        if self.role == "scout" and ProbabilisticSearchManager:
-            self.logger.log("Role is SCOUT. Initializing local ProbabilisticSearchManager.")
+        # --- REFACTORED: All drones now load the AI module ---
+        # All drones participate in the shared probabilistic model,
+        # even if they just listen (like Payload).
+        if ProbabilisticSearchManager:
+            self.logger.log(f"Role {self.role.upper()}: Initializing local ProbabilisticSearchManager.")
             self.prob_search_manager = ProbabilisticSearchManager(
                 config.prob_search,
                 config.strategies.search.area
             )
-        elif self.role == "scout":
-            self.logger.log("Role is SCOUT, but AI module not loaded. AI search disabled.", "error")
+        else:
+            self.logger.log(f"Role {self.role.upper()}: AI module not loaded. Probabilistic search disabled.", "error")
         # ----------------------------------------
         
         self.state_machine = MissionStateMachine(self, mqtt_client)
@@ -149,7 +155,7 @@ class MissionController:
     async def _p2p_event_listener(self):
         """
         Main P2P loop that waits for global events and triggers
-        autonomous role-based actions based on.
+        autonomous role-based actions based on [cite: Cobalt drone].
         """
         async for topic, payload in self.mqtt.listen():
             try:
@@ -171,21 +177,21 @@ class MissionController:
                         if self.role == "scout":
                             self.logger.log("MOB Event: Assuming ROLE_SEARCH_PRIMARY", "info")
                             self.current_mission_type = "MOB_SEARCH"
-                            # AI search logic will be used in _run_search_step
                             await self.start_mission()
                         
                         elif self.role == "payload":
-                            self.logger.log("MOB Event: Assuming ROLE_SEARCH_DELIVER (-> STANDBY)", "info")
-                            self.current_mission_type = "STANDBY" # Will launch and wait
-                            # Standby at safe altitude near home
-                            self.target_position = Position(**self.config.strategies.search.area.model_dump())
-                            self.target_position.z = 30.0 # Standby altitude
-                            await self.start_standby_mission()
+                            # --- CORRECTED LOGIC ---
+                            # Payload drone joins the co-op search, as per the patent.
+                            # It is forbidden from UTILITY tasks, not emergency SEARCH_ASSIST.
+                            self.logger.log("MOB Event: Assuming ROLE_SEARCH_ASSIST (Payload)", "info")
+                            self.current_mission_type = "MOB_SEARCH"
+                            await self.start_mission()
+                            # --- END CORRECTION ---
                         
                         elif self.role == "utility":
                             self.logger.log("MOB Event: Assuming ROLE_SEARCH_ASSIST", "info")
                             self.current_mission_type = "MOB_SEARCH"
-                            self.search_behavior.search_strategy = self.search_strategies['lawnmower']
+                            # self.search_behavior.search_strategy = self.search_strategies['lawnmower'] # No longer needed, uses AI
                             await self.start_mission()
 
                     # --- Use Case 2: General Emergencies (L3) ---
@@ -218,7 +224,7 @@ class MissionController:
                             await self.start_patrol_mission()
                         
                         elif self.role == "scout":
-                            # Logic from: "only allows it to accept... if its battery is above a high threshold"
+                            # Logic from [cite: Cobalt drone]: "only allows it to accept... if its battery is above a high threshold"
                             if self.drone.telemetry.battery > self.high_battery_threshold:
                                 self.logger.log(f"Scout accepting Utility task (battery {self.drone.telemetry.battery}% > {self.high_battery_threshold}%)", "info")
                                 self.current_mission_type = "PATROL"
@@ -228,7 +234,7 @@ class MissionController:
                                 self.logger.log(f"Scout battery {self.drone.telemetry.battery}% < {self.high_battery_threshold}%. Ignoring Utility task.", "warning")
                         
                         elif self.role == "payload":
-                            # Logic from: "This drone is forbidden from performing COMPLIANCE (Utility) tasks"
+                            # Logic from [cite: Cobalt drone]: "This drone is forbidden from performing COMPLIANCE (Utility) tasks"
                             self.logger.log("Payload role is FORBIDDEN from Utility tasks. Ignoring.", "warning")
                             # Do nothing
                 
@@ -255,9 +261,8 @@ class MissionController:
                 # --- P2P Event: Shared Map Update ---
                 elif topic == "fleet/map/update":
                     source_drone = payload.get("drone_id")
+                    # Update our map if it's from *another* drone and we have an AI manager
                     if source_drone != self.drone.id and self.prob_search_manager:
-                        # Update our local map with info from another drone
-                        # This is the "gossip algorithm"
                         self.logger.log(f"Received map update from {source_drone}", "debug")
                         self.prob_search_manager.update_map(
                             drone_pos=Position(**payload["position"]),
@@ -358,10 +363,8 @@ class MissionController:
                 alt = 30.0
             else: # MOB_SEARCH
                 # --- NEW: Use AI config altitude ---
-                if self.role == "scout" and self.prob_search_manager:
-                    alt = self.config.prob_search.search_altitude
-                else: # Utility drone doing assist
-                    alt = self.config.lawnmower.patrol_altitude
+                # Both Scout and Utility use the AI search altitude
+                alt = self.config.prob_search.search_altitude
             
             if not await self.drone.takeoff(alt):
                 raise Exception("Takeoff command failed.")
@@ -373,8 +376,8 @@ class MissionController:
 
     async def _run_search_step(self, event):
         self.logger.log(f"Entering SEARCHING state (Role: {self.state.value})", "info")
-        if not self.search_behavior:
-            self.logger.log("Error: Cannot enter SEARCHING (no camera/behavior).", "error")
+        if not self.search_behavior or not self.prob_search_manager:
+            self.logger.log("Error: Cannot enter SEARCHING (no camera/behavior or AI module).", "error")
             await self.trigger_emergency(event=event)
             return
 
@@ -382,40 +385,37 @@ class MissionController:
             try:
                 detection = None
                 
-                # --- NEW: AI-Driven Search for SCOUT ---
-                if self.role == "scout" and self.prob_search_manager:
-                    # 1. Evolve map for drift
-                    self.prob_search_manager.evolve_map(dt=1.0) # Assume 1s loop
-                    
-                    # 2. Get next AI waypoint
-                    next_wp = self.prob_search_manager.get_next_search_waypoint()
-                    self.logger.log(f"[AI Search] Flying to new waypoint: {next_wp}", "debug")
-                    await self.drone.go_to(next_wp)
-                    
-                    # 3. Scan at waypoint
-                    # We assume search_step() is a point-scan or short hover
-                    should_continue, detection = await self.search_behavior.search_step()
-                    
-                    # 4. Update AI map
-                    self.prob_search_manager.update_map(
-                        drone_pos=self.drone.telemetry.position,
-                        drone_altitude=self.drone.telemetry.position.z,
-                        has_detection=bool(detection)
-                    )
-                    
-                    # 5. --- P2P SHARE ---
-                    # Broadcast our finding to the fleet
-                    await self.mqtt.publish("fleet/map/update", {
-                        "drone_id": self.drone.id,
-                        "position": self.drone.telemetry.position.model_dump(),
-                        "altitude": self.drone.telemetry.position.z,
-                        "has_detection": bool(detection)
-                    })
+                # --- REFACTORED: AI-Driven Search for BOTH Scout and Utility ---
+                # This is the true co-op search. Both roles use the AI.
                 
-                # --- Original Lawnmower Search for UTILITY (Assist) ---
-                else:
-                    self.search_behavior.search_strategy = self.search_strategies['lawnmower']
-                    should_continue, detection = await self.search_behavior.search_step()
+                # 1. Evolve map for drift
+                self.prob_search_manager.evolve_map(dt=1.0) # Assume 1s loop
+                
+                # 2. Get next AI waypoint
+                next_wp = self.prob_search_manager.get_next_search_waypoint()
+                self.logger.log(f"[AI Search] Role {self.role.upper()} flying to new waypoint: {next_wp}", "debug")
+                await self.drone.go_to(next_wp)
+                
+                # 3. Scan at waypoint
+                # We assume search_step() is a point-scan or short hover
+                should_continue, detection = await self.search_behavior.search_step()
+                
+                # 4. Update *local* AI map
+                self.prob_search_manager.update_map(
+                    drone_pos=self.drone.telemetry.position,
+                    drone_altitude=self.drone.telemetry.position.z,
+                    has_detection=bool(detection)
+                )
+                
+                # 5. --- P2P SHARE ---
+                # Broadcast our finding to the fleet
+                self.logger.log(f"Broadcasting map update to fleet/map/update", "debug")
+                await self.mqtt.publish("fleet/map/update", {
+                    "drone_id": self.drone.id,
+                    "position": self.drone.telemetry.position.model_dump(),
+                    "altitude": self.drone.telemetry.position.z,
+                    "has_detection": bool(detection)
+                })
 
                 # --- Common logic ---
                 if detection:
@@ -490,7 +490,8 @@ class MissionController:
             await self.drone.go_to(self.target_position)
             self.logger.log(f"Holding position at {self.target_position}", "info")
             # Drone will just hover here. The `_p2p_event_listener`
-            # is waiting for the `fleet/event/target_found` message.
+            # is waiting for the `fleet/event/target_found` message
+            # and `fleet/map/update` to keep its local map "hot".
             while self.state == MissionPhase.ROLE_EMERGENCY_STANDBY:
                 await asyncio.sleep(1.0)
                 
@@ -598,3 +599,4 @@ class MissionController:
         else:
             self.logger.log("No target was confirmed.", "info")
         await self.mission_finished()
+

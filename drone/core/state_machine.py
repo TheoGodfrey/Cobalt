@@ -90,6 +90,14 @@ class MissionStateMachine:
             MissionPhase.TAKEOFF, 
             MissionPhase.ROLE_SEARCH_ASSIST, 
             after='_run_search_step', 
+            conditions=['_is_mob_search', '_is_payload']
+        )
+
+        self.machine.add_transition(
+            'takeoff_success', 
+            MissionPhase.TAKEOFF, 
+            MissionPhase.ROLE_SEARCH_ASSIST, 
+            after='_run_search_step', 
             conditions=['_is_mob_search', '_is_utility']
         )
         self.machine.add_transition(
@@ -123,6 +131,9 @@ class MissionStateMachine:
         )
 
 
+
+        
+
         # --- Target Sighting Logic ---
         self.machine.add_transition(
             'target_sighted', 
@@ -143,6 +154,13 @@ class MissionStateMachine:
             MissionPhase.ROLE_SEARCH_ASSIST, # Go back to searching
             after='_handle_rejection',
             conditions=['_is_utility']
+        )
+        self.machine.add_transition(
+            'reject_target', 
+            MissionPhase.TARGET_PENDING_CONFIRMATION, 
+            MissionPhase.ROLE_SEARCH_ASSIST, # Go back to searching
+            after='_handle_rejection',
+            conditions=['_is_payload']
         )
         self.machine.add_transition(
             'confirm_target', 
