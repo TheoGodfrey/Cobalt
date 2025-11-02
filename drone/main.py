@@ -6,13 +6,16 @@ import asyncio
 import argparse
 from pathlib import Path
 
+# BUG #4: Function is load_mission_file, not load_mission
 from core.g1_mission_definition.loader import load_mission
 from core.g2_execution_core.mission_controller import MissionController
+# BUG #5: These factory functions are not defined
 from core.g3_capability_plugins import get_detector, get_strategy, get_actuator
 from core.g4_platform_interface.hal import get_flight_controller
 from core.g4_platform_interface.vehicle_state import VehicleState
 from core.cross_cutting.communication import MqttClient
 from core.cross_cutting.safety_monitor import SafetyMonitor
+# BUG #6: load_config is not defined in the empty config_models.py
 from core.utils.config_models import load_config
 
 async def main():

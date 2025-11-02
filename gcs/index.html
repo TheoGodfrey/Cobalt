@@ -15,20 +15,23 @@
         <h1 class="text-3xl font-bold text-cyan-400">COBALT GCS</h1>
         <p class="text-lg text-gray-400 mb-6">Ground Control Station</p>
 
-        <!-- Mission Control Card -->
         <div class="bg-gray-800 p-6 rounded-lg shadow-xl mb-6">
             <h2 class="text-xl font-semibold mb-4">Mission Control</h2>
-            <div class="flex space-x-4">
+            <div class="flex flex-col sm:flex-row sm:space-x-4 sm:items-end">
+                
+                <div class="flex-grow mb-4 sm:mb-0">
+                    <label for="missionFile" class="block text-sm font-medium text-gray-400 mb-1">Mission File Name</label>
+                    <input type="text" id="missionFile" value="mob_search_001.json" class="bg-gray-700 text-white w-full py-2 px-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500" />
+                </div>
+
                 <button id="startMissionBtn" class="bg-cyan-500 hover:bg-cyan-600 text-white font-bold py-2 px-4 rounded-lg transition duration-200">
-                    Start Mission (mob_search_001.json)
+                    Start Mission
                 </button>
-                <button id="abortAllBtn" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition duration-200">
+                <button id="abortAllBtn" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition duration-200 mt-2 sm:mt-0">
                     ABORT ALL (RTH)
                 </button>
             </div>
         </div>
-
-        <!-- System Status Card -->
         <div class="bg-gray-800 p-6 rounded-lg shadow-xl mb-6">
             <div class="flex justify-between items-center mb-4">
                 <h2 class="text-xl font-semibold">System Status</h2>
@@ -37,11 +40,9 @@
             <pre id="log" class="bg-gray-900 rounded-md p-4 h-64 overflow-y-auto text-sm font-mono whitespace-pre-wrap"></pre>
         </div>
 
-        <!-- Fleet Status Card -->
         <div class="bg-gray-800 p-6 rounded-lg shadow-xl">
             <h2 class="text-xl font-semibold mb-4">Fleet Status</h2>
             <div id="fleetList" class="space-y-4">
-                <!-- Drone status will be injected here -->
                 <p class="text-gray-500">No drones connected...</p>
             </div>
         </div>
@@ -53,6 +54,7 @@
         const fleetList = document.getElementById('fleetList');
         const startMissionBtn = document.getElementById('startMissionBtn');
         const abortAllBtn = document.getElementById('abortAllBtn');
+        const missionFile = document.getElementById('missionFile'); // <-- Get the new input field
 
         let ws;
         const fleet = {}; // Object to store drone states
@@ -163,12 +165,19 @@
 
         // --- Send Commands ---
         startMissionBtn.addEventListener('click', () => {
+            // FIX for Bug #18: Read mission ID from the input field
+            const missionId = missionFile.value;
+            if (!missionId) {
+                logMessage("GCS: Error - No mission file specified.");
+                return;
+            }
+            
             const command = {
                 action: "START_MISSION",
-                mission_id: "mob_search_001.json"
+                mission_id: missionId // Use the dynamic value
             };
             ws.send(JSON.stringify(command));
-            logMessage("GCS: Sent START_MISSION command.");
+            logMessage(`GCS: Sent START_MISSION (${missionId}) command.`);
         });
 
         abortAllBtn.addEventListener('click', () => {

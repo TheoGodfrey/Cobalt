@@ -34,7 +34,12 @@ class SimulatedController(BaseFlightController):
     """
     
     def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
+        # Call super() with config (fixes Bug #7 compatibility)
+        super().__init__(config) 
+        
+        # FIX for Bug #8: self.config is now set by the base class
+        # We can now safely access it.
+        
         self._current_pos = Waypoint(0, 0, 0)
         self._target_pos: Optional[Waypoint] = None
         self._flight_speed_ms = self.config.get("flight_speed_ms", 10.0)
@@ -58,7 +63,13 @@ class SimulatedController(BaseFlightController):
         while True:
             await asyncio.sleep(1.0) # Update telemetry 1 time per second
             
-            new_mode = VehicleModeEnum.GUIDED
+            # Default to GUIDED if we're not DISARMED
+            new_mode = self.vehicle_state.mode
+            if new_mode == VehicleModeEnum.DISARMED:
+                is_armed = False
+            else:
+                is_armed = True
+                new_mode = VehicleModeEnum.GUIDED # Default active mode
             
             # 1. Simulate flight
             if self._target_pos:
@@ -73,11 +84,17 @@ class SimulatedController(BaseFlightController):
                     move = self._flight_speed_ms if dx > 0 else -self._flight_speed_ms
                     self._current_pos.x += move
             else:
-                new_mode = VehicleModeEnum.ARMED # Loitering
+                if is_armed:
+                    new_mode = VehicleModeEnum.ARMED # Loitering
             
             # 2. Simulate battery drain
-            self._battery -= 1.0 / 20.0 
-            if self._battery < 0: self._battery = 0
+            # --- FIX for Bug #19 ---
+            # Only drain battery if motors are active (ARMED or GUIDED)
+            active_modes = (VehicleModeEnum.ARMED, VehicleModeEnum.GUIDED)
+            if new_mode in active_modes:
+                # Drains 1% every 20 seconds (approx 33 min flight time)
+                self._battery -= 1.0 / 20.0 
+                if self._battery < 0: self._battery = 0
             
             # 3. Create and publish telemetry
             new_telem = Telemetry(
@@ -85,7 +102,7 @@ class SimulatedController(BaseFlightController):
                 mode=new_mode,
                 gps_status=GPSStatusEnum.RTK_FIXED,
                 battery_percent=self._battery,
-                is_armed=True
+                is_armed=is_armed
             )
             self.vehicle_state.update(new_telem)
 
