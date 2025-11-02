@@ -23,8 +23,10 @@ async def main():
     
     # 1. Initialize Communication Layer
     # The Hub needs its own MQTT client to act as the master
-    hub_comms = MqttClient(client_id="hub_master")
-    await hub_comms.connect(MQTT_HOST, MQTT_PORT)
+# 1. Initialize Communication Layer
+    # The Hub needs its own MQTT client to act as the master
+    hub_comms = MqttClient(client_id="hub_master", host=MQTT_HOST, port=MQTT_PORT)
+    await hub_comms.connect()
 
     # 2. Initialize Core Hub Components
     fleet_coord = FleetCoordinator(hub_comms)

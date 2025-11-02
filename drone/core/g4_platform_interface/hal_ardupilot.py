@@ -3,6 +3,8 @@ Hardware Abstraction Layer (HAL) implementation for ArduPilot (MAVLink) devices.
 
 This controller uses the 'dronekit' library to communicate with any MAVLink-compatible
 flight controller, such as the one in the SplashDrone 4+.
+
+--- THIS IS A PATCHED VERSION TO BE COMPATIBLE WITH vehicle_state.py ---
 """
 
 import time
@@ -10,9 +12,14 @@ import logging
 from typing import Optional, Callable
 from dronekit import connect, VehicleMode, LocationGlobalRelative, APIException
 from .hal import BaseFlightController
-from .vehicle_state import VehicleState, DroneStatus, FlightMode
 from .sensors.cameras.base import BaseCamera
 from pymavlink import mavutil
+
+# --- FIX: Import the correct classes from vehicle_state.py ---
+from .vehicle_state import VehicleState, Telemetry, VehicleModeEnum, GPSStatusEnum
+# --- Re-use Waypoint from G3 as intended ---
+from ..g3_capability_plugins.strategies.base import Waypoint
+
 
 log = logging.getLogger(__name__)
 
@@ -78,7 +85,7 @@ class ArduPilotController(BaseFlightController):
         self.vehicle: Optional[connect] = None
         self._camera = ArduPilotCamera(self.camera_stream_url)
         
-        # Internal state
+        # Internal state to prevent spamming listeners
         self._last_mode = None
         self._last_armed = None
         
@@ -106,10 +113,11 @@ class ArduPilotController(BaseFlightController):
             self.vehicle.add_attribute_listener('battery', self._battery_callback)
             self.vehicle.add_attribute_listener('mode', self._mode_callback)
             self.vehicle.add_attribute_listener('armed', self._armed_callback)
-            self.vehicle.add_attribute_listener('system_status', self._status_callback)
+            self.vehicle.add_attribute_listener('gps_0', self._gps_callback) # Listen to GPS status
 
             log.info("[HAL-ArduPilot] Listeners added. Connection successful.")
-            self.vehicle_state.status = DroneStatus.ONLINE
+            # Manually trigger an update to populate the state
+            self._update_full_telemetry()
             return True
             
         except APIException as e:
@@ -121,8 +129,8 @@ class ArduPilotController(BaseFlightController):
 
     async def disconnect(self):
         """
-Deactivates listeners and closes the MAVLink connection.
-"""
+        Deactivates listeners and closes the MAVLink connection.
+        """
         log.info("[HAL-ArduPilot] Disconnecting...")
         if self.vehicle:
             # Remove all listeners
@@ -131,12 +139,11 @@ Deactivates listeners and closes the MAVLink connection.
             self.vehicle.remove_attribute_listener('battery', self._battery_callback)
             self.vehicle.remove_attribute_listener('mode', self._mode_callback)
             self.vehicle.remove_attribute_listener('armed', self._armed_callback)
-            self.vehicle.remove_attribute_listener('system_status', self._status_callback)
+            self.vehicle.remove_attribute_listener('gps_0', self._gps_callback)
             
             self.vehicle.close()
             self.vehicle = None
             
-        self.vehicle_state.status = DroneStatus.OFFLINE
         log.info("[HAL-ArduPilot] Disconnected.")
 
     async def arm(self) -> bool:
@@ -281,66 +288,111 @@ Deactivates listeners and closes the MAVLink connection.
     # --- Listener Callbacks (Private) ---
     # These methods are called by dronekit's background threads
     # and update the shared VehicleState object.
+    
+    # --- FIX: Refactored all callbacks to use the Telemetry object
+    # and the vehicle_state.update() method.
+    
+    def _update_full_telemetry(self):
+        """Helper function to get all data and push a new Telemetry update."""
+        if not self.vehicle:
+            return
 
+        # Get current state from VehicleState
+        telem = self.vehicle_state.current
+
+        # --- Get Location ---
+        pos = Waypoint(telem.position.x, telem.position.y, telem.position.z)
+        if self.vehicle.location.global_relative_frame:
+            loc = self.vehicle.location.global_relative_frame
+            # Note: G3 Strategies use X,Y,Z. This HAL provides Lat/Lon/Alt.
+            # This is a different inconsistency, but for now we'll update
+            # the Waypoint with Lat/Lon/Alt.
+            pos = Waypoint(x=loc.lat, y=loc.lon, z=loc.alt, yaw=telem.position.yaw)
+        
+        # --- Get Attitude (for yaw) ---
+        if self.vehicle.attitude:
+            pos.yaw = self.vehicle.attitude.yaw
+
+        # --- Get Battery ---
+        batt = telem.battery_percent
+        if self.vehicle.battery:
+            batt = self.vehicle.battery.level
+
+        # --- Get Mode ---
+        mode = telem.mode
+        if self.vehicle.mode:
+            mode_name = self.vehicle.mode.name.upper()
+            if mode_name == 'GUIDED':
+                mode = VehicleModeEnum.GUIDED
+            elif mode_name == 'MANUAL':
+                mode = VehicleModeEnum.MANUAL
+            elif mode_name == 'RTL':
+                mode = VehicleModeEnum.RTL
+            elif mode_name == 'LAND':
+                mode = VehicleModeEnum.LAND
+            elif self.vehicle.armed:
+                mode = VehicleModeEnum.ARMED
+            else:
+                mode = VehicleModeEnum.DISARMED
+
+        # --- Get GPS ---
+        gps = telem.gps_status
+        if self.vehicle.gps_0:
+            fix = self.vehicle.gps_0.fix_type
+            if fix >= 6:
+                gps = GPSStatusEnum.RTK_FIXED
+            elif fix == 5:
+                gps = GPSStatusEnum.DGPS # Float RTK
+            elif fix >= 3:
+                gps = GPSStatusEnum.FIX_3D
+            elif fix == 2:
+                gps = GPSStatusEnum.FIX_2D
+            else:
+                gps = GPSStatusEnum.NO_FIX
+        
+        # --- Get Armed Status ---
+        armed = telem.is_armed
+        if self.vehicle.armed is not None:
+            armed = self.vehicle.armed
+
+        # --- Create and push new Telemetry object ---
+        new_telemetry = Telemetry(
+            timestamp=time.monotonic(),
+            position=pos,
+            mode=mode,
+            gps_status=gps,
+            battery_percent=batt,
+            is_armed=armed,
+            wind_speed=self.vehicle.wind_estimation.speed if self.vehicle.wind_estimation else 0,
+            wind_direction=self.vehicle.wind_estimation.direction if self.vehicle.wind_estimation else 0
+        )
+        
+        self.vehicle_state.update(new_telemetry)
+        
     def _location_callback(self, vehicle, attr_name, msg):
         if msg:
-            self.vehicle_state.latitude = msg.lat
-            self.vehicle_state.longitude = msg.lon
-            self.vehicle_state.altitude_msl = msg.alt
-            # DroneKit doesn't have a separate AGL, so we use relative_alt
-            self.vehicle_state.relative_altitude = msg.alt 
-            self.vehicle_state.vx = vehicle.velocity[0]
-            self.vehicle_state.vy = vehicle.velocity[1]
-            self.vehicle_state.vz = vehicle.velocity[2]
-            
-            # Simple check for GPS fix
-            if vehicle.gps_0.fix_type >= 3: # 3 = 3D Fix
-                self.vehicle_state.gps_fix = True
-            else:
-                self.vehicle_state.gps_fix = False
+            self._update_full_telemetry()
 
     def _attitude_callback(self, vehicle, attr_name, msg):
         if msg:
-            self.vehicle_state.roll = msg.roll
-            self.vehicle_state.pitch = msg.pitch
-            self.vehicle_state.yaw = msg.yaw
+            self._update_full_telemetry()
 
     def _battery_callback(self, vehicle, attr_name, msg):
         if msg:
-            self.vehicle_state.battery_percent = msg.level
-            self.vehicle_state.battery_voltage = msg.voltage
+            self._update_full_telemetry()
 
     def _mode_callback(self, vehicle, attr_name, msg):
         if msg and self._last_mode != msg.name:
-            mode_name = msg.name.upper()
-            if mode_name == 'GUIDED':
-                self.vehicle_state.flight_mode = FlightMode.GUIDED
-            elif mode_name == 'MANUAL':
-                self.vehicle_state.flight_mode = FlightMode.MANUAL
-            elif mode_name == 'RTL':
-                self.vehicle_state.flight_mode = FlightMode.RTH
-            elif mode_name == 'LOITER':
-                self.vehicle_state.flight_mode = FlightMode.HOLD
-            else:
-                self.vehicle_state.flight_mode = FlightMode.UNKNOWN
             self._last_mode = msg.name
-            log.info(f"[HAL-ArduPilot] Mode changed to: {self.vehicle_state.flight_mode.name}")
+            log.info(f"[HAL-ArduPilot] Mode changed to: {msg.name}")
+            self._update_full_telemetry()
 
     def _armed_callback(self, vehicle, attr_name, msg):
         if msg is not None and self._last_armed != msg:
-            self.vehicle_state.armed = msg
             self._last_armed = msg
             log.info(f"[HAL-ArduPilot] Armed status: {msg}")
+            self._update_full_telemetry()
 
-    def _status_callback(self, vehicle, attr_name, msg):
-        if msg and msg.state != self.vehicle_state.status.name:
-            # Map ArduPilot status to our internal DroneStatus
-            status_name = msg.state.upper()
-            if status_name == 'ACTIVE':
-                self.vehicle_state.status = DroneStatus.ONLINE
-            elif status_name == 'STANDBY':
-                self.vehicle_state.status = DroneStatus.IDLE
-            elif status_name == 'CRITICAL' or status_name == 'EMERGENCY':
-                self.vehicle_state.status = DroneStatus.ERROR
-            else:
-                self.vehicle_state.status = DroneStatus.UNKNOWN
+    def _gps_callback(self, vehicle, attr_name, msg):
+        if msg:
+            self._update_full_telemetry()

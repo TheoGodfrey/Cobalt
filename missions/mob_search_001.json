@@ -1,0 +1,42 @@
+{
+  "mission_id": "mob_search_001",
+  "mission_name": "Mobile Search and Rescue",
+  "start_phase": "searching",
+  "hub_failsafe": "RTH",
+  "phases": {
+    "searching": {
+      "tasks": {
+        "scout": {
+          "action": "EXECUTE_SEARCH",
+          "detector": "thermal_detector",
+          "strategy": "lawnmower"
+        }
+      },
+      "transitions": {
+        "on_event:target_found": {
+          "scout": "goto:returning"
+        }
+      }
+    },
+    "returning": {
+      "tasks": {
+        "scout": {
+          "action": "EXECUTE_RTH",
+          "strategy": "lawnmower"
+        }
+      },
+      "transitions": {
+        "on_state:LANDING": {
+          "scout": "goto:mission_complete"
+        }
+      }
+    },
+    "mission_complete": {
+      "tasks": {
+        "scout": {
+          "action": "IGNORE"
+        }
+      }
+    }
+  }
+}

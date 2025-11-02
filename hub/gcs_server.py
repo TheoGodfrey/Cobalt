@@ -39,12 +39,12 @@ class GcsServer:
         """Process incoming messages from a GCS client."""
         try:
             message = json.loads(message_str)
-            command_type = message.get("type")
-            
-            print(f"[GcsServer] Received command: {command_type}")
-            
-            if command_type == "LAUNCH_MISSION":
-                mission_file = message.get("mission_file")
+            command_action = message.get("action") # <-- FIX
+
+            print(f"[GcsServer] Received command: {command_action}")
+
+            if command_action == "START_MISSION": # <-- FIX
+                mission_file = message.get("mission_id") # <-- FIX
                 if mission_file:
                     # Run as a task so we don't block the server
                     asyncio.create_task(
@@ -53,11 +53,11 @@ class GcsServer:
                 else:
                     await websocket.send(json.dumps({"type": "ERROR", "message": "No mission_file provided"}))
                     
-            elif command_type == "PING":
+            elif command_action == "PING":
                 await websocket.send(json.dumps({"type": "PONG", "timestamp": time.monotonic()}))
             
             else:
-                await websocket.send(json.dumps({"type": "ERROR", "message": f"Unknown command {command_type}"}))
+                await websocket.send(json.dumps({"type": "ERROR", "message": f"Unknown command {command_action}"}))
 
         except json.JSONDecodeError:
             print("[GcsServer] Received invalid JSON message")

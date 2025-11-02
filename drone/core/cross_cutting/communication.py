@@ -28,7 +28,7 @@ class MqttClient:
     # Topic definitions
     LWT_TOPIC_PREFIX = "fleet/lwt"
     
-    def __init__(self, client_id: str, host: str = "localhost", port: int = 1883, config: Optional[Dict] = None):
+    def __init__(self, client_id: str, host: str = "localhost", port: int = 1883, user: Optional[str] = None, password: Optional[str] = None, config: Optional[Dict] = None):
         """
         Initializes the MQTT client.
         
@@ -36,6 +36,8 @@ class MqttClient:
             client_id: The unique ID for this client.
             host: The MQTT broker hostname.
             port: The MQTT broker port.
+            user: The MQTT username (optional).
+            password: The MQTT password (optional).
             config: Optional config dict (e.g., from drone/main.py).
         """
         self._client_id = client_id
@@ -45,12 +47,19 @@ class MqttClient:
         # Paho client setup
         self._client = mqtt.Client(client_id=client_id)
         self._client.on_connect = self._on_connect
+
+        # --- FIX: Set username and password ---
+        if user and password:
+            self._client.username_pw_set(user, password)
+        # --- End of FIX ---
+
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message
         
         # Use asyncio for the event loop
         self._client.loop_start() # Starts a background thread for network I/O
         
+        self._loop = asyncio.get_running_loop()
         # Subscription management
         # topic -> async callback
         self._subscriptions: Dict[str, AsyncMsgCallback] = {}
@@ -94,9 +103,11 @@ class MqttClient:
                 drone_id = topic.split('/')[-1]
                 data = json.loads(payload_str)
                 
-                if data.get("status") == "offline":
+                if data.get("status") == "offline": 
                     # Pass the disconnected drone_id to the callback
-                    asyncio.create_task(self._lwt_callback(drone_id))
+                    # --- FIX: Use threadsafe call to the main loop ---
+                    coro = self._lwt_callback(drone_id)
+                    asyncio.run_coroutine_threadsafe(coro, self._loop)
                 
             except Exception as e:
                 log.error(f"[MQTT-{self._client_id}] Error processing LWT message on {topic}: {e}")
@@ -117,7 +128,10 @@ class MqttClient:
                 # Deserialize JSON payload
                 payload_dict = json.loads(payload_str)
                 # Schedule the async callback to run
-                asyncio.create_task(callback(topic, payload_dict))
+                # --- FIX: Use threadsafe call to the main loop ---
+                coro = callback(topic, payload_dict)
+                asyncio.run_coroutine_threadsafe(coro, self._loop)
+                # --- End of FIX ---
             except json.JSONDecodeError:
                 log.warning(f"[MQTT-{self._client_id}] Received non-JSON message on {topic}")
             except Exception as e:
@@ -149,9 +163,10 @@ class MqttClient:
                 await asyncio.sleep(0.1)
                 
             # Publish an 'online' message to our LWT topic
-            online_payload = json.dumps({"status": "online", "drone_id": self._client_id})
+        # Publish an 'online' message to our LWT topic
+            online_payload = {"status": "online", "drone_id": self._client_id}
             await self.publish(f"{self.LWT_TOPIC_PREFIX}/{self._client_id}", online_payload, retain=True)
-
+        
         except Exception as e:
             log.error(f"[MQTT-{self._client_id}] Failed to connect: {e}")
 
@@ -159,7 +174,7 @@ class MqttClient:
         """Disconnects the client gracefully."""
         log.info(f"[MQTT-{self._client_id}] Disconnecting...")
         # Publish 'offline' message gracefully
-        lwt_payload = json.dumps({"status": "offline", "drone_id": self._client_id})
+        lwt_payload = {"status": "offline", "drone_id": self._client_id}
         await self.publish(f"{self.LWT_TOPIC_PREFIX}/{self._client_id}", lwt_payload, retain=True)
         
         self._client.loop_stop() # Stop the background thread

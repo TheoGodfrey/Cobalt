@@ -6,7 +6,10 @@ import asyncio
 from typing import Optional, Dict, Set, Any
 from ..g1_mission_definition.mission_flow import MissionFlow
 # Import the enum as well to map strings to enum members
-from ..g2_execution_core.mission_state import MissionState, MissionStateEnum
+from ..g2_execution_core.mission_state import (
+    MissionState, MissionStateEnum, 
+    MISSION_PHASE_TO_ENUM, MISSION_ENUM_TO_PHASE # <-- FIX for Bug #11
+)
 from ..g2_execution_core.behaviors import BehaviorFactory
 
 class MissionController:
@@ -56,19 +59,32 @@ class MissionController:
     async def execute_mission(self):
         """Generic mission execution loop"""
         
+        current_phase_key = "None" # For error logging
+        next_phase_name = "None" # For error logging
+        
         try:
             # Start at the defined start phase
-            start_phase_enum = MissionStateEnum[self.mission_flow.start_phase.upper()]
+            
+            # --- FIX for Bug #11 ---
+            start_phase_key = self.mission_flow.start_phase
+            if start_phase_key not in MISSION_PHASE_TO_ENUM:
+                raise ValueError(f"Start phase '{start_phase_key}' in mission file is not a valid phase name.")
+            start_phase_enum = MISSION_PHASE_TO_ENUM[start_phase_key]
+            # --- End of Fix ---
             
             # FIX: Method is .transition(), not .transition_to()
-            await self.mission_state.transition(start_phase_enum)
+            self.mission_state.transition(start_phase_enum)
             
             # Check if mission is complete (e.g., if start_phase was RTH)
             while not self.mission_state.current in (MissionStateEnum.MISSION_COMPLETE, MissionStateEnum.ABORTED, MissionStateEnum.IDLE):
                 # Get current phase definition from JSON
-                # Note: self.mission_state.current.name is e.g., "SEARCHING"
-                # We need the lowercase version for the key
-                current_phase_key = self.mission_state.current.name.lower()
+                
+                # --- FIX for Bug #11 (This is the line 73 issue) ---
+                if self.mission_state.current not in MISSION_ENUM_TO_PHASE:
+                    raise ValueError(f"Current state '{self.mission_state.current.name}' has no mapping to a phase key.")
+                current_phase_key = MISSION_ENUM_TO_PHASE[self.mission_state.current]
+                # --- End of Fix ---
+                
                 phase = self.mission_flow.phases[current_phase_key]
                 
                 # Execute all tasks for this drone's role
@@ -91,11 +107,17 @@ class MissionController:
                 if trigger:
                     # FIX: Parse "goto:delivery" string to MissionStateEnum.DELIVERING
                     next_phase_str = phase.transitions[trigger][drone_role]
-                    next_phase_name = next_phase_str.replace("goto:", "").upper()
-                    next_phase_enum = MissionStateEnum[next_phase_name]
+                    
+                    # --- FIX for Bug #11 ---
+                    next_phase_key = next_phase_str.replace("goto:", "")
+                    if next_phase_key not in MISSION_PHASE_TO_ENUM:
+                        raise ValueError(f"Transition 'goto' phase '{next_phase_key}' is not a valid phase name.")
+                    next_phase_enum = MISSION_PHASE_TO_ENUM[next_phase_key]
+                    next_phase_name = next_phase_key # For logging
+                    # --- End of Fix ---
                     
                     # FIX: Method is .transition(), not .transition_to()
-                    await self.mission_state.transition(next_phase_enum)
+                    self.mission_state.transition(next_phase_enum)
                 else:
                     # If wait_for_trigger returns None (e.g., not implemented)
                     print("[MissionController] No trigger returned. Assuming mission is stuck.")
@@ -105,11 +127,11 @@ class MissionController:
             print(f"[MissionController] CRITICAL ERROR: Phase mismatch or invalid key: {e}")
             print(f"  Check if '{current_phase_key}' or (if defined) '{next_phase_name}' exists in mission file and MissionStateEnum.")
             # FIX: Method is .transition(), not .transition_to()
-            await self.mission_state.transition(MissionStateEnum.ABORTED)
+            self.mission_state.transition(MissionStateEnum.ABORTED)
         except Exception as e:
             print(f"[MissionController] CRITICAL ERROR during execution: {e}")
             # FIX: Method is .transition(), not .transition_to()
-            await self.mission_state.transition(MissionStateEnum.ABORTED)
+            self.mission_state.transition(MissionStateEnum.ABORTED)
         finally:
             # Cleanup listeners
             await self._cleanup_listeners()

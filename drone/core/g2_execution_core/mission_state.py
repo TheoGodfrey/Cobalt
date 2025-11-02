@@ -32,6 +32,32 @@ class MissionStateEnum(Enum):
     # Add PATROLLING as requested by mission_controller
     PATROLLING = auto() 
 
+# --- FIX for Bug #11: Add explicit mappings ---
+
+# A mapping from mission file phase names (strings) to enum members
+MISSION_PHASE_TO_ENUM: Dict[str, MissionStateEnum] = {
+    "idle": MissionStateEnum.IDLE,
+    "starting": MissionStateEnum.STARTING,
+    "searching": MissionStateEnum.SEARCHING,
+    "confirming": MissionStateEnum.CONFIRMING,
+    "delivering": MissionStateEnum.DELIVERING,
+    "returning": MissionStateEnum.RETURNING,
+    "paused": MissionStateEnum.PAUSED,
+    "emergency_rth": MissionStateEnum.EMERGENCY_RTH,
+    "landing": MissionStateEnum.LANDING,
+    "aborted": MissionStateEnum.ABORTED,
+    "mission_complete": MissionStateEnum.MISSION_COMPLETE,
+    "patrolling": MissionStateEnum.PATROLLING,
+}
+
+# A reverse mapping from enum members to phase names (strings)
+MISSION_ENUM_TO_PHASE: Dict[MissionStateEnum, str] = {
+    v: k for k, v in MISSION_PHASE_TO_ENUM.items()
+}
+
+# --- End of FIX for Bug #11 ---
+
+
 # Type alias for a state log entry: (timestamp, from_state, to_state)
 StateLogEntry = Tuple[float, MissionStateEnum, MissionStateEnum]
 
@@ -45,7 +71,10 @@ def get_mission_transitions() -> Dict[MissionStateEnum, Set[MissionStateEnum]]:
     
     transitions: Dict[MissionStateEnum, Set[MissionStateEnum]] = {
         MissionStateEnum.IDLE: {
-            MissionStateEnum.STARTING
+            MissionStateEnum.STARTING,
+            MissionStateEnum.SEARCHING,  # <-- ADD THIS
+            MissionStateEnum.PATROLLING, # <-- ADD THIS
+            MissionStateEnum.DELIVERING
         },
         MissionStateEnum.STARTING: {
             MissionStateEnum.SEARCHING, 
@@ -224,4 +253,3 @@ class MissionState:
 
     def __str__(self) -> str:
         return f"MissionState(current={self.current.name})"
-

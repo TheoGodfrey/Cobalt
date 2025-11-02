@@ -84,7 +84,7 @@ async def main():
             'host': config.get('network', {}).get('mqtt_broker_host', 'localhost'),
             'port': config.get('network', {}).get('mqtt_broker_port', 1883),
             'user': config.get('network', {}).get('mqtt_user'),
-            'pass': config.get('network', {}).get('mqtt_pass'),
+            'password': config.get('network', {}).get('mqtt_pass'),
         }
         
         logger.log(f"Connecting to MQTT broker at {mqtt_config['host']}:{mqtt_config['port']}...", "info")
