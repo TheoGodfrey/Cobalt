@@ -1,59 +1,173 @@
 """
 Main entry point for COBALT drone client.
 Usage: python main.py --id scout_1 --mission missions/mob_search_001.json
+
+FIX for Bug #10: MissionLogger now receives drone_id parameter
 """
 import asyncio
 import argparse
 from pathlib import Path
 
-# BUG #4: Function is load_mission_file, not load_mission
-from core.g1_mission_definition.loader import load_mission
+# Bug #4 fix: Use load_mission_file, not load_mission
+from core.g1_mission_definition.loader import load_mission_file
+from core.g1_mission_definition.parser import parse_mission_flow
 from core.g2_execution_core.mission_controller import MissionController
-# BUG #5: These factory functions are not defined
+
+# Bug #2 fix: Factory functions exist
 from core.g3_capability_plugins import get_detector, get_strategy, get_actuator
+
+# Bug #3 fix: get_flight_controller factory exists
 from core.g4_platform_interface.hal import get_flight_controller
 from core.g4_platform_interface.vehicle_state import VehicleState
+
 from core.cross_cutting.communication import MqttClient
 from core.cross_cutting.safety_monitor import SafetyMonitor
-# BUG #6: load_config is not defined in the empty config_models.py
+
+# Bug #6 fix: load_config exists
 from core.utils.config_models import load_config
 
+# Bug #10 fix: Import MissionLogger
+from core.utils.logger import MissionLogger
+
 async def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--id', required=True, help='Drone ID (scout_1, payload_1, etc.)')
-    parser.add_argument('--mission', required=True, help='Path to mission JSON')
+    parser = argparse.ArgumentParser(
+        description='COBALT Drone Mission Controller',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument('--id', required=True, 
+                       help='Drone ID (e.g., scout_1, payload_1)')
+    parser.add_argument('--mission', required=True, 
+                       help='Path to mission JSON file')
+    parser.add_argument('--config', default='config/mission_config.yaml',
+                       help='Path to configuration file (default: config/mission_config.yaml)')
+    parser.add_argument('--log-dir', default='logs',
+                       help='Directory for log files (default: logs)')
+    parser.add_argument('--max-logs', type=int, default=0,
+                       help='Maximum number of log files to keep (0 = unlimited)')
+    
     args = parser.parse_args()
     
-    # 1. Load configuration and mission
-    config = load_config('config/mission_config.yaml')
-    mission_flow = load_mission(args.mission)
-    
-    # 2. Create hardware layer
-    flight_controller = get_flight_controller(config.drone_type, args.id)
-    vehicle_state = VehicleState()
-    
-    # 3. Create communication
-    mqtt = MqttClient(config.mqtt, client_id=args.id)
-    await mqtt.connect()
-    
-    # 4. Create safety monitor (cross-cutting)
-    safety_monitor = SafetyMonitor(config.safety, mqtt)
-    
-    # 5. Create mission controller (generic orchestrator)
-    controller = MissionController(
-        mission_flow=mission_flow,
-        flight_controller=flight_controller,
-        vehicle_state=vehicle_state,
-        mqtt=mqtt,
-        safety_monitor=safety_monitor,
-        config=config
+    # ====================================================================================
+    # FIX for Bug #10: Create MissionLogger with drone_id
+    # ====================================================================================
+    logger = MissionLogger(
+        log_dir=args.log_dir,
+        max_logs=args.max_logs,
+        drone_id=args.id  # CRITICAL: Must pass drone_id
     )
+    logger.log(f"Starting COBALT drone: {args.id}", "info")
+    logger.log(f"Mission file: {args.mission}", "info")
+    logger.log(f"Config file: {args.config}", "info")
+    # ====================================================================================
     
-    # 6. Run mission
-    await asyncio.gather(
-        controller.execute_mission(),
-        safety_monitor.monitor_loop()
-    )
+    try:
+        # 1. Load configuration and mission
+        logger.log("Loading configuration...", "info")
+        config = load_config(args.config)
+        
+        logger.log("Loading mission file...", "info")
+        mission_data = load_mission_file(Path(args.mission))
+        mission_flow = parse_mission_flow(mission_data)
+        logger.log(f"Mission '{mission_flow.mission_id}' loaded successfully", "info")
+        
+        # 2. Create hardware layer
+        logger.log(f"Initializing HAL for {args.id}...", "info")
+        flight_controller = get_flight_controller(config, args.id)
+        vehicle_state = flight_controller.vehicle_state
+        
+        logger.log("Connecting to hardware...", "info")
+        await flight_controller.connect()
+        logger.log("Hardware connection established", "info")
+        
+        # 3. Create communication
+        mqtt_config = {
+            'host': config.get('network', {}).get('mqtt_broker_host', 'localhost'),
+            'port': config.get('network', {}).get('mqtt_broker_port', 1883),
+            'user': config.get('network', {}).get('mqtt_user'),
+            'pass': config.get('network', {}).get('mqtt_pass'),
+        }
+        
+        logger.log(f"Connecting to MQTT broker at {mqtt_config['host']}:{mqtt_config['port']}...", "info")
+        mqtt = MqttClient(client_id=args.id, **mqtt_config)
+        await mqtt.connect()
+        logger.log("MQTT connection established", "info")
+        
+        # 4. Create safety monitor
+        safety_config = config.get('safety', {})
+        safety_monitor = SafetyMonitor(
+            config=safety_config,
+            mqtt=mqtt,
+            mission_state=None,  # Will be set by MissionController
+            vehicle_state=vehicle_state
+        )
+        logger.log("Safety monitor initialized", "info")
+        
+        # 5. Create mission controller
+        logger.log("Initializing mission controller...", "info")
+        controller = MissionController(
+            mission_flow=mission_flow,
+            flight_controller=flight_controller,
+            vehicle_state=vehicle_state,
+            mqtt=mqtt,
+            safety_monitor=safety_monitor,
+            config=config
+        )
+        
+        # Link the mission_state to the safety monitor
+        safety_monitor.mission_state = controller.mission_state
+        
+        logger.log("=" * 70, "info")
+        logger.log(f"MISSION START: {mission_flow.mission_id}", "info")
+        logger.log("=" * 70, "info")
+        
+        # 6. Run mission
+        await asyncio.gather(
+            controller.execute_mission(),
+            safety_monitor.monitor_loop()
+        )
+        
+        logger.log("=" * 70, "info")
+        logger.log("MISSION COMPLETE", "info")
+        logger.log("=" * 70, "info")
+        
+        # Log mission summary
+        summary = {
+            "Mission ID": mission_flow.mission_id,
+            "Drone ID": args.id,
+            "Final State": controller.mission_state.current.name,
+            "Final Battery": f"{vehicle_state.battery_percent:.1f}%",
+            "Mission Duration": "N/A"  # Would calculate from timestamps
+        }
+        logger.log_summary(summary)
+        
+    except KeyboardInterrupt:
+        logger.log("Mission interrupted by user", "warning")
+        print("\n[Main] Shutting down gracefully...")
+        
+    except Exception as e:
+        logger.log(f"CRITICAL ERROR: {e}", "error")
+        import traceback
+        logger.log(traceback.format_exc(), "error")
+        raise
+        
+    finally:
+        # Cleanup
+        try:
+            if 'mqtt' in locals():
+                await mqtt.disconnect()
+            if 'flight_controller' in locals():
+                await flight_controller.disarm()
+            logger.log("Shutdown complete", "info")
+            print(f"\n[Main] Logs saved to: {logger.get_log_path()}")
+        except Exception as e:
+            print(f"[Main] Error during cleanup: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[Main] Interrupted")
+    except Exception as e:
+        print(f"\n[Main] Fatal error: {e}")
+        import sys
+        sys.exit(1)

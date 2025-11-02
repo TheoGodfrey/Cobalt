@@ -18,6 +18,9 @@ from ..g1_mission_definition.phase import Task
 from ..g3_capability_plugins.detectors.base import Detection
 from ..g3_capability_plugins.strategies.base import Waypoint
 
+# FIX for Bug #6: Import the factory functions from Bug #2
+from ..g3_capability_plugins import get_detector, get_strategy, get_actuator
+
 # --- Dependency Interface Definitions (using Protocols) ---
 # These define the interfaces that Behaviors expect from other components
 # (Detectors, Strategies, Actuators, HAL) without creating circular imports.
@@ -223,58 +226,146 @@ class RTHBehavior(BaseBehavior):
 # Add other behaviors as needed (Patrol, Standby, etc.)
 
 
-# --- Behavior Factory ---
-# This class is the fix for Bug #1
-# It is responsible for creating the correct behavior based on the mission task
+# ====================================================================================
+# FIX for Bug #6: Complete BehaviorFactory Implementation
+# ====================================================================================
 
 class BehaviorFactory:
     """
     Instantiates and injects dependencies into the correct Behavior
     based on a task definition.
+    
+    This factory uses the plugin factory functions (Bug #2 fix) to
+    actually load and configure plugins instead of just printing mock messages.
     """
     def __init__(self, config: Dict[str, Any]):
         """
-        Initializes the factory.
-        In a real system, this is where you would load all available
-        plugins (detectors, strategies, actuators).
+        Initializes the factory with configuration.
+        
+        Args:
+            config: The complete mission configuration dictionary
         """
-        # For now, we'll create them on the fly.
-        # A real system would use a plugin registry.
         self.config = config
-        print("[BehaviorFactory] Initialized.")
+        print("[BehaviorFactory] Initialized with configuration.")
 
     def _get_plugins(self, task: Task, hal: HAL) -> Dict[str, Any]:
         """
-        A helper to instantiate the plugins required by a task.
-        This is a simple implementation; a real one would be
-        more robust, loading plugins by name from a registry.
+        Instantiates the plugins required by a task using the factory functions.
+        
+        This is the FIX for Bug #6: Instead of just printing mock messages,
+        this now actually creates plugin instances.
+        
+        Args:
+            task: The Task definition from the mission JSON
+            hal: The Hardware Abstraction Layer providing hardware interfaces
+            
+        Returns:
+            A dictionary of instantiated plugins: {"detector": ..., "strategy": ..., "actuator": ...}
         """
         dependencies = {}
         
-        # --- This part is still simulated ---
-        # A real implementation would look up these names in a
-        # plugin registry and instantiate the correct class.
-        
+        # --- Detector Loading ---
         if task.detector:
-            # e.g., if task.detector == "thermal_detector":
-            # from ..g3_capability_plugins.detectors.thermal_detector import ThermalDetector
-            # dependencies["detector"] = ThermalDetector(hal.get_camera(0))
-            print(f"[BehaviorFactory] Mock loading Detector: {task.detector}")
-            
+            try:
+                print(f"[BehaviorFactory] Loading Detector: {task.detector}")
+                
+                # Get camera hardware from HAL
+                camera = hal.get_camera(0)  # Use camera 0 by default
+                
+                # Get detector-specific configuration
+                detector_config = self._get_plugin_config("detectors", task.detector)
+                
+                # Use the factory function from Bug #2 fix
+                detector = get_detector(task.detector, camera, detector_config)
+                dependencies["detector"] = detector
+                
+                print(f"[BehaviorFactory] ✓ Detector '{task.detector}' loaded successfully")
+                
+            except ValueError as e:
+                print(f"[BehaviorFactory] ✗ ERROR: Unknown detector type '{task.detector}': {e}")
+                # Don't add to dependencies if loading fails
+            except Exception as e:
+                print(f"[BehaviorFactory] ✗ ERROR: Failed to load detector '{task.detector}': {e}")
+        
+        # --- Strategy Loading ---
         if task.strategy:
-            # e.g., if task.strategy == "lawnmower":
-            # from ..g3_capability_plugins.strategies.lawnmower import LawnmowerStrategy
-            # dependencies["strategy"] = LawnmowerStrategy(hal.vehicle_state, self.config.get('lawnmower_config'))
-            print(f"[BehaviorFactory] Mock loading Strategy: {task.strategy}")
-
+            try:
+                print(f"[BehaviorFactory] Loading Strategy: {task.strategy}")
+                
+                # Get vehicle state from HAL
+                vehicle_state = hal.vehicle_state
+                
+                # Get strategy-specific configuration
+                strategy_config = self._get_plugin_config("strategies", task.strategy)
+                
+                # Use the factory function from Bug #2 fix
+                strategy = get_strategy(task.strategy, vehicle_state, strategy_config)
+                dependencies["strategy"] = strategy
+                
+                print(f"[BehaviorFactory] ✓ Strategy '{task.strategy}' loaded successfully")
+                
+            except ValueError as e:
+                print(f"[BehaviorFactory] ✗ ERROR: Unknown strategy type '{task.strategy}': {e}")
+            except Exception as e:
+                print(f"[BehaviorFactory] ✗ ERROR: Failed to load strategy '{task.strategy}': {e}")
+        
+        # --- Actuator Loading ---
         if task.actuator:
-            # e.g., if task.actuator == "payload_dropper":
-            # from ..g3_capability_plugins.actuators.payload_dropper import PayloadDropper
-            # dependencies["actuator"] = PayloadDropper(hal.get_actuator_hardware(0))
-            print(f"[BehaviorFactory] Mock loading Actuator: {task.actuator}")
-            
-        # This is highly simplified. A real DI system is needed.
+            try:
+                print(f"[BehaviorFactory] Loading Actuator: {task.actuator}")
+                
+                # Get actuator hardware from HAL
+                actuator_hardware = hal.get_actuator_hardware(0)  # Use actuator 0 by default
+                
+                # Get actuator-specific configuration
+                actuator_config = self._get_plugin_config("actuators", task.actuator)
+                
+                # Use the factory function from Bug #2 fix
+                actuator = get_actuator(task.actuator, actuator_hardware, actuator_config)
+                dependencies["actuator"] = actuator
+                
+                print(f"[BehaviorFactory] ✓ Actuator '{task.actuator}' loaded successfully")
+                
+            except ValueError as e:
+                print(f"[BehaviorFactory] ✗ ERROR: Unknown actuator type '{task.actuator}': {e}")
+            except Exception as e:
+                print(f"[BehaviorFactory] ✗ ERROR: Failed to load actuator '{task.actuator}': {e}")
+        
         return dependencies
+    
+    def _get_plugin_config(self, plugin_category: str, plugin_name: str) -> Dict[str, Any]:
+        """
+        Retrieves configuration for a specific plugin from the main config.
+        
+        This method looks for plugin configuration in the following locations (in order):
+        1. config[plugin_category][plugin_name]  (e.g., config["strategies"]["lawnmower"])
+        2. config["plugins"][plugin_name]         (e.g., config["plugins"]["lawnmower"])
+        3. Empty dict (default)
+        
+        Args:
+            plugin_category: Category of plugin ("detectors", "strategies", "actuators")
+            plugin_name: Name of the specific plugin (e.g., "thermal_detector")
+            
+        Returns:
+            Configuration dictionary for the plugin
+        """
+        # Try category-specific config first
+        if plugin_category in self.config:
+            if plugin_name in self.config[plugin_category]:
+                config = self.config[plugin_category][plugin_name]
+                print(f"[BehaviorFactory] Using config from '{plugin_category}.{plugin_name}'")
+                return config
+        
+        # Try generic plugins section
+        if "plugins" in self.config:
+            if plugin_name in self.config["plugins"]:
+                config = self.config["plugins"][plugin_name]
+                print(f"[BehaviorFactory] Using config from 'plugins.{plugin_name}'")
+                return config
+        
+        # Default to empty config
+        print(f"[BehaviorFactory] No config found for '{plugin_name}', using defaults")
+        return {}
 
     def create(self, 
                  task: Task, 
@@ -282,13 +373,32 @@ class BehaviorFactory:
                  hal: HAL) -> BaseBehavior:
         """
         Factory method to create a behavior instance.
+        
+        This is the main entry point for creating behaviors.
+        It loads all required plugins and injects them into the behavior.
+        
+        Args:
+            task: The Task definition from the mission JSON
+            mission_state: The shared MissionState object
+            hal: The Hardware Abstraction Layer
+            
+        Returns:
+            An instance of a BaseBehavior subclass
+            
+        Raises:
+            ValueError: If the task action is not recognized
         """
         
+        print(f"[BehaviorFactory] Creating behavior for action: {task.action}")
+        
         # 1. Get the required plugins for this task
-        # This is a placeholder for a real dependency injection system
+        # This now actually loads plugins (Bug #6 fix)
         dependencies = self._get_plugins(task, hal)
+        
+        # 2. Validate that required plugins were loaded
+        self._validate_dependencies(task, dependencies)
 
-        # 2. Instantiate the correct behavior based on the task action
+        # 3. Instantiate the correct behavior based on the task action
         action = task.action.upper()
         
         if action == "EXECUTE_SEARCH":
@@ -304,3 +414,29 @@ class BehaviorFactory:
         
         else:
             raise ValueError(f"Unknown behavior action: {task.action}")
+    
+    def _validate_dependencies(self, task: Task, dependencies: Dict[str, Any]):
+        """
+        Validates that all required plugins for a task were successfully loaded.
+        
+        Logs warnings for missing plugins but doesn't raise errors, allowing
+        behaviors to fail gracefully during execution.
+        
+        Args:
+            task: The Task definition
+            dependencies: The loaded dependencies
+        """
+        action = task.action.upper()
+        
+        # Define required dependencies for each action
+        requirements = {
+            "EXECUTE_SEARCH": ["detector", "strategy"],
+            "EXECUTE_DELIVERY": ["strategy", "actuator"],
+            "EXECUTE_RTH": ["strategy"],
+        }
+        
+        if action in requirements:
+            for required in requirements[action]:
+                if required not in dependencies or dependencies[required] is None:
+                    print(f"[BehaviorFactory] ⚠ WARNING: Required plugin '{required}' not loaded for action '{action}'")
+                    print(f"[BehaviorFactory]   The behavior may fail during execution.")

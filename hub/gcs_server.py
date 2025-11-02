@@ -101,7 +101,7 @@ class GcsServer:
                     client.send(state_message) for client in self.connected_clients
                 ])
             except Exception as e:
-                print(f"[GGcsServer] Error broadcasting state: {e}")
+                print(f"[GcsServer] Error broadcasting state: {e}")
 
     async def run(self):
         """Starts the WebSocket server."""
