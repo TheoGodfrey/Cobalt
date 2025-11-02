@@ -1,87 +1,58 @@
 """
-Main entry point for the Tier 2 Comms & Charging Hub.
-
-This process runs at the "docking station"[cite: 30]. It is a
-"non-thinking component"  that enables the P2P swarm.
-
-It runs:
-1. The GcsServer (for Level 2 Local Operation) [cite: 59]
-2. The SatelliteRelay (for Tier 3 Uplink) 
+Hub Main Entry Point
+This file initializes and runs all Tier 2 Hub services.
 """
+
 import asyncio
-import yaml
-import sys
-import traceback
-from pathlib import Path
+import os
+from drone.core.cross_cutting.communication import MqttClient
+from .fleet_coordinator import FleetCoordinator
+from .gcs_server import GcsServer
+from .charging_monitor import ChargingMonitor
+from .satellite_relay import SatelliteRelay
 
-# --- Robust Import Logic ---
-FILE = Path(__file__).resolve()
-ROOT = FILE.parent.parent
-CORE_PATH = ROOT / "v_0_2" / "scout_drone"
-if str(CORE_PATH) not in sys.path:
-    sys.path.append(str(CORE_PATH))
-# --- End Import Logic ---
-
-from drone.core.config_models import Settings
-from drone.core.comms import MqttClient
-from hub.gcs_server import GcsServer
-from satellite_relay import SatelliteRelay
-
-def load_config(config_path: str = "v_0_2/scout_drone/config/mission_config.yaml") -> Settings:
-    """Load and validate configuration."""
-    config_file = ROOT / config_path
-    try:
-        with open(config_file, 'r') as f:
-            config_data = yaml.safe_load(f)
-        settings = Settings(**config_data)
-        return settings
-    except FileNotFoundError:
-        print(f"FATAL: Configuration file not found at {config_file}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"FATAL: Error validating configuration file {config_file}:\n{e}")
-        sys.exit(1)
+# --- Configuration ---
+MQTT_HOST = os.environ.get("MQTT_HOST", "localhost")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", 1883))
+GCS_PORT = int(os.environ.get("GCS_PORT", 8765))
 
 async def main():
-    """Main asynchronous entry point for the Tier 2 Hub."""
-    mqtt_client = None
-    try:
-        # 1. Load configuration
-        config = load_config()
+    """
+    Initializes and runs all concurrent hub tasks.
+    """
+    
+    # 1. Initialize Communication Layer
+    # The Hub needs its own MQTT client to act as the master
+    hub_comms = MqttClient(client_id="hub_master")
+    await hub_comms.connect(MQTT_HOST, MQTT_PORT)
 
-        # 2. Create MQTT Comms Client for the Hub
-        # This client represents the Hub's high-gain antenna [cite: 34]
-        mqtt_client = MqttClient(config.mqtt, client_id="tier_2_hub")
-        await mqtt_client.connect()
-        if not mqtt_client.is_connected:
-            raise ConnectionError("Failed to connect to MQTT broker.")
+    # 2. Initialize Core Hub Components
+    fleet_coord = FleetCoordinator(hub_comms)
+    gcs_server = GcsServer(fleet_coord, port=GCS_PORT)
+    charging_mon = ChargingMonitor(num_pads=4)
+    sat_relay = SatelliteRelay()
+    
+    # 3. Link components if needed
+    # (e.g., FleetCoordinator needs to know about charging status)
+    charging_mon.add_listener(
+        lambda pad_id, status: 
+            print(f"Callback: Pad {pad_id} is now {status.name}")
+            # fleet_coord.update_pad_status(pad_id, status) # <-- Example
+    )
 
-        # 3. Create GCS Server (for Level 2/3) [cite: 59, 62]
-        # We pass the MQTT client to it so it can PUBLISH events
-        gcs_server = GcsServer(config.gcs, mqtt_client) 
+    print("[HubMain] All components initialized. Starting concurrent tasks...")
 
-        # 4. Create the Satellite Relay 
-        relay = SatelliteRelay(mqtt_client)
-
-        # 5. Run all services concurrently
-        print("[HubMain] Running all Tier 2 services (GCS, SatRelay)...")
-        await asyncio.gather(
-            gcs_server.run(),
-            relay.run()
-        )
-
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        print("\n[HubMain] Shutting down...")
-    except Exception as e:
-        print(f"[HubMain] Fatal error: {e}")
-        traceback.print_exc()
-    finally:
-        if mqtt_client and mqtt_client.is_connected:
-            await mqtt_client.disconnect()
-        print("[HubMain] Shutdown complete.")
+    # 4. Run all components concurrently
+    await asyncio.gather(
+        hub_comms.run(),          # MQTT client loop
+        fleet_coord.listen(),     # FleetCoordinator's subscription loop
+        gcs_server.run(),         # GCS WebSocket server
+        charging_mon.run(),       # Charging pad monitor loop
+        sat_relay.run()           # Satellite uplink loop
+    )
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n[HubMain] Shutdown complete.")
+        print("\n[HubMain] Shutting down.")

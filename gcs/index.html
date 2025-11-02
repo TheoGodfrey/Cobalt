@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>COBALT GCS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 p-8">
+
+    <div class="max-w-4xl mx-auto">
+        <h1 class="text-3xl font-bold text-cyan-400">COBALT GCS</h1>
+        <p class="text-lg text-gray-400 mb-6">Ground Control Station</p>
+
+        <!-- Mission Control Card -->
+        <div class="bg-gray-800 p-6 rounded-lg shadow-xl mb-6">
+            <h2 class="text-xl font-semibold mb-4">Mission Control</h2>
+            <div class="flex space-x-4">
+                <button id="startMissionBtn" class="bg-cyan-500 hover:bg-cyan-600 text-white font-bold py-2 px-4 rounded-lg transition duration-200">
+                    Start Mission (mob_search_001.json)
+                </button>
+                <button id="abortAllBtn" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition duration-200">
+                    ABORT ALL (RTH)
+                </button>
+            </div>
+        </div>
+
+        <!-- System Status Card -->
+        <div class="bg-gray-800 p-6 rounded-lg shadow-xl mb-6">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-semibold">System Status</h2>
+                <div id="statusIndicator" class="w-4 h-4 rounded-full bg-red-500" title="Disconnected"></div>
+            </div>
+            <pre id="log" class="bg-gray-900 rounded-md p-4 h-64 overflow-y-auto text-sm font-mono whitespace-pre-wrap"></pre>
+        </div>
+
+        <!-- Fleet Status Card -->
+        <div class="bg-gray-800 p-6 rounded-lg shadow-xl">
+            <h2 class="text-xl font-semibold mb-4">Fleet Status</h2>
+            <div id="fleetList" class="space-y-4">
+                <!-- Drone status will be injected here -->
+                <p class="text-gray-500">No drones connected...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const log = document.getElementById('log');
+        const statusIndicator = document.getElementById('statusIndicator');
+        const fleetList = document.getElementById('fleetList');
+        const startMissionBtn = document.getElementById('startMissionBtn');
+        const abortAllBtn = document.getElementById('abortAllBtn');
+
+        let ws;
+        const fleet = {}; // Object to store drone states
+
+        function connect() {
+            // Assumes GCS server is on port 8765
+            ws = new WebSocket('ws://' + window.location.hostname + ':8765');
+
+            ws.onopen = () => {
+                logMessage('GCS: Connected to Hub (WebSocket)');
+                statusIndicator.classList.remove('bg-red-500');
+                statusIndicator.classList.add('bg-green-500');
+                statusIndicator.title = 'Connected';
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                
+                // Log all messages
+                logMessage(`HUB: ${event.data}`);
+
+                // Update fleet status
+                if (msg.type === 'telemetry' || msg.type === 'lwt') {
+                    updateFleetStatus(msg.payload.drone_id, msg.payload);
+                } else if (msg.type === 'detection') {
+                    updateFleetStatus(msg.payload.drone_id, { 
+                        last_detection: msg.payload, 
+                        state: fleet[msg.payload.drone_id]?.state || 'UNKNOWN' 
+                    });
+                } else if (msg.type === 'phase_update') {
+                     updateFleetStatus(msg.payload.drone_id, { 
+                        state: msg.payload.phase_name,
+                        mission_state: msg.payload.mission_state
+                    });
+                }
+            };
+
+            ws.onclose = () => {
+                logMessage('GCS: Disconnected from Hub. Retrying in 3s...');
+                statusIndicator.classList.add('bg-red-500');
+                statusIndicator.classList.remove('bg-green-500');
+                statusIndicator.title = 'Disconnected';
+                setTimeout(connect, 3000);
+            };
+
+            ws.onerror = (err) => {
+                logMessage(`GCS: WebSocket error: ${err.message}`);
+                ws.close();
+            };
+        }
+
+        function logMessage(message) {
+            log.textContent = `[${new Date().toLocaleTimeString()}] ${message}\n` + log.textContent;
+        }
+
+        function updateFleetStatus(droneId, data) {
+            if (!fleet[droneId]) {
+                fleet[droneId] = {}; // Create new entry if not exists
+            }
+
+            // Update state
+            if (data.status) { // LWT message
+                fleet[droneId].state = data.status.toUpperCase();
+                fleet[droneId].lwt_timestamp = Date.now();
+            }
+            if (data.mission_state) { // From phase update
+                fleet[droneId].state = `${data.phase_name} (${data.mission_state})`;
+            }
+            if (data.battery_percent) { // Telemetry
+                fleet[droneId].battery = data.battery_percent;
+                fleet[droneId].position = `(${data.latitude.toFixed(4)}, ${data.longitude.toFixed(4)}) @ ${data.relative_altitude.toFixed(0)}m`;
+            }
+            if (data.last_detection) {
+                fleet[droneId].last_detection = `Found ${data.last_detection.class_label} (${data.last_detection.confidence.toFixed(2)})`;
+            }
+            
+            fleet[droneId].last_update = Date.now();
+            renderFleetList();
+        }
+
+        function renderFleetList() {
+            fleetList.innerHTML = ''; // Clear list
+            if (Object.keys(fleet).length === 0) {
+                 fleetList.innerHTML = '<p class="text-gray-500">No drones connected...</p>';
+                 return;
+            }
+
+            for (const droneId in fleet) {
+                const drone = fleet[droneId];
+                const stateColor = drone.state === 'online' ? 'text-green-400' : (drone.state === 'offline' ? 'text-red-400' : 'text-yellow-400');
+                
+                const html = `
+                    <div class="bg-gray-700 p-4 rounded-lg">
+                        <div class="flex justify-between items-center">
+                            <span class="text-lg font-bold">${droneId}</span>
+                            <span class="font-mono ${stateColor}">${drone.state || 'UNKNOWN'}</span>
+                        </div>
+                        <div class="text-sm text-gray-300 mt-2">
+                            ${drone.battery ? `<div><strong>Battery:</strong> ${drone.battery.toFixed(1)}%</div>` : ''}
+                            ${drone.position ? `<div><strong>Position:</strong> ${drone.position}</div>` : ''}
+                            ${drone.last_detection ? `<div class="text-cyan-300"><strong>Detection:</strong> ${drone.last_detection}</div>` : ''}
+                        </div>
+                    </div>
+                `;
+                fleetList.innerHTML += html;
+            }
+        }
+
+        // --- Send Commands ---
+        startMissionBtn.addEventListener('click', () => {
+            const command = {
+                action: "START_MISSION",
+                mission_id: "mob_search_001.json"
+            };
+            ws.send(JSON.stringify(command));
+            logMessage("GCS: Sent START_MISSION command.");
+        });
+
+        abortAllBtn.addEventListener('click', () => {
+            const command = {
+                action: "ABORT_ALL",
+                failsafe_action: "EXECUTE_RTH"
+            };
+            ws.send(JSON.stringify(command));
+            logMessage("GCS: Sent ABORT_ALL (RTH) command.");
+        });
+
+
+        // Start connection
+        connect();
+    </script>
+</body>
+</html>

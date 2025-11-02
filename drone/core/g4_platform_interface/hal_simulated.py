@@ -1,34 +1,21 @@
 """
-Component 9: Hardware Abstraction Layer (HAL)
-Unified interface to vehicle hardware.
-
-This is the ONLY component that should talk to hardware (or the simulator).
-It provides a high-level API for other components (like Behaviors) to use.
-
-It owns and manages:
-- The VehicleState (Component 10)
-- The low-level hardware interfaces (e.g., MAVLink connection)
-- The sensor objects (e.g., BaseCamera)
-- The actuator objects (e.g., ActuatorHardware)
+HAL Implementation: SimulatedController
 """
 
 import asyncio
 import time
-from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Dict, Any
 
-# Import component 10
-from .vehicle_state import VehicleState, Telemetry, VehicleModeEnum, GPSStatusEnum
+# Import base class
+from .hal import BaseFlightController
 
-# Import protocols (interfaces) from G3/G4
+# Import component 10 definitions
+from .vehicle_state import Telemetry, VehicleModeEnum, GPSStatusEnum
+
+# Import protocols (interfaces)
 from ..g3_capability_plugins.strategies.base import Waypoint
 from .sensors.cameras.base import BaseCamera, SimulatedCamera
 from ..g3_capability_plugins.actuators.base import ActuatorHardware
-
-
-# --- Simulated Hardware Implementations ---
-# These are the *simulated* low-level hardware pieces that the
-# *simulated* HAL will control.
 
 class SimulatedActuator(ActuatorHardware):
     """Simulated hardware for a payload dropper."""
@@ -40,68 +27,17 @@ class SimulatedActuator(ActuatorHardware):
         print(f"  [SimHW] *** Dropper mechanism RELEASED ***")
         await asyncio.sleep(0.1)
 
-# --- HAL Base Class ---
-
-class BaseFlightController(ABC):
-    """
-    The abstract interface for the HAL.
-    All high-level components (G2, G3) code against this interface.
-    """
-    
-    def __init__(self):
-        self.vehicle_state = VehicleState()
-
-    @abstractmethod
-    async def connect(self):
-        """Establish connection to the flight controller."""
-        pass
-        
-    @abstractmethod
-    async def arm(self):
-        """Arm the vehicle."""
-        pass
-        
-    @abstractmethod
-    async def disarm(self):
-        """Disarm the vehicle."""
-        pass
-        
-    @abstractmethod
-    async def goto(self, waypoint: Waypoint) -> bool:
-        """
-        Fly to a specific waypoint.
-        Returns True on arrival, False on failure.
-        """
-        pass
-        
-    @abstractmethod
-    async def land(self) -> bool:
-        """Land at the current position."""
-        pass
-        
-    @abstractmethod
-    def get_camera(self, camera_id: int) -> BaseCamera:
-        """Get an interface to a camera."""
-        pass
-        
-    @abstractmethod
-    def get_actuator_hardware(self, actuator_id: int) -> ActuatorHardware:
-        """Get an interface to an actuator."""
-        pass
-
-# --- HAL Concrete Implementation ---
-
 class SimulatedController(BaseFlightController):
     """
     A concrete implementation of the HAL for use in simulation.
     It simulates flight physics, battery drain, and sensors.
     """
     
-    def __init__(self):
-        super().__init__()
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
         self._current_pos = Waypoint(0, 0, 0)
         self._target_pos: Optional[Waypoint] = None
-        self._flight_speed_ms = 10.0 # 10 m/s
+        self._flight_speed_ms = self.config.get("flight_speed_ms", 10.0)
         self._battery = 100.0
         self._start_time = time.monotonic()
         self._telemetry_task: Optional[asyncio.Task] = None
@@ -111,7 +47,7 @@ class SimulatedController(BaseFlightController):
         self._actuators = {0: SimulatedActuator()}
         
     async def connect(self):
-        print("[SimulatedHAL] Connecting to simulated drone...")
+        print(f"[SimulatedHAL] Connecting to simulated drone (Speed: {self._flight_speed_ms} m/s)...")
         await asyncio.sleep(0.5)
         # Start the background task that updates telemetry
         self._telemetry_task = asyncio.create_task(self._update_telemetry())
@@ -140,7 +76,6 @@ class SimulatedController(BaseFlightController):
                 new_mode = VehicleModeEnum.ARMED # Loitering
             
             # 2. Simulate battery drain
-            # Drains 1% every 20 seconds (approx 33 min flight time)
             self._battery -= 1.0 / 20.0 
             if self._battery < 0: self._battery = 0
             
@@ -204,13 +139,7 @@ class SimulatedController(BaseFlightController):
         return True
 
     def get_camera(self, camera_id: int) -> BaseCamera:
-        """Returns the simulated camera object."""
         return self._cameras[camera_id]
         
     def get_actuator_hardware(self, actuator_id: int) -> ActuatorHardware:
-        """Returns the simulated actuator hardware."""
         return self._actuators[actuator_id]
-
-# In a real system, you would also have:
-# class MavlinkController(BaseFlightController):
-#    ... (implementation using dronekit or pymavlink)

@@ -1,52 +1,229 @@
 """
-Component 4: Behaviors
-Task execution with pure dependency injection
-"""
-from typing import Protocol
+Component 4: Behavior
+Task execution logic.
 
-class SearchBehavior:
-    """Generic search behavior that works with ANY detector/strategy/actuator"""
+This file defines the abstract BaseBehavior and concrete implementations
+(e.g., SearchBehavior, DeliveryBehavior) as specified in the COBALT architecture.
+Behaviors are instantiated by the MissionController and receive their
+dependencies (plugins, HAL) via dependency injection.
+"""
+
+import asyncio
+from abc import ABC, abstractmethod
+from typing import Protocol, Optional, Any, Dict
+from .mission_state import MissionState, MissionStateEnum
+
+# --- Dependency Interface Definitions (using Protocols) ---
+# These define the interfaces that Behaviors expect from other components
+# (Detectors, Strategies, Actuators, HAL) without creating circular imports.
+
+class Detection:
+    """Placeholder for a detection object."""
+    def __init__(self, position: Any, confidence: float):
+        self.position = position
+        self.confidence = confidence
+
+class Waypoint:
+    """Placeholder for a waypoint object."""
+    def __init__(self, x: float, y: float, z: float):
+        self.x, self.y, self.z = x, y, z
+
+class Detector(Protocol):
+    """Expected interface for a Detector plugin."""
+    async def detect(self) -> Optional[Detection]:
+        ...
+
+class Strategy(Protocol):
+    """Expected interface for a Strategy plugin."""
+    async def next_waypoint(self) -> Waypoint:
+        ...
+
+class Actuator(Protocol):
+    """Expected interface for an Actuator plugin."""
+    async def execute(self) -> bool: # Returns True on success
+        ...
+
+class HAL(Protocol):
+    """Expected interface for the Hardware Abstraction Layer."""
+    async def goto(self, waypoint: Waypoint) -> bool: # Returns True on arrival
+        ...
     
-    def __init__(self, detector, strategy, actuator, flight_controller):
-        # Pure dependency injection - NO creation logic
-        self.detector = detector
-        self.strategy = strategy
-        self.actuator = actuator
-        self.hal = flight_controller
-    
+    async def get_position(self) -> Waypoint:
+        ...
+
+# --- Base Behavior ---
+
+class BaseBehavior(ABC):
+    """
+    Abstract base class for all mission behaviors.
+    """
+    def __init__(self,
+                 mission_state: MissionState,
+                 hal: HAL,
+                 dependencies: Dict[str, Any]):
+        """
+        Initialize the behavior with its required dependencies.
+        
+        Args:
+            mission_state: The shared MissionState object.
+            hal: The Hardware Abstraction Layer.
+            dependencies: A dictionary of required plugins, e.g.,
+                          {"detector": ThermalDetector(), "strategy": ProbSearch()}
+        """
+        self.mission_state = mission_state
+        self.hal = hal
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+        
+        # Assign injected dependencies
+        self.detector: Optional[Detector] = dependencies.get("detector")
+        self.strategy: Optional[Strategy] = dependencies.get("strategy")
+        self.actuator: Optional[Actuator] = dependencies.get("actuator")
+
+    async def start(self):
+        """Starts the behavior's run loop as an async task."""
+        if self._running:
+            return
+        self._running = True
+        self._task = asyncio.create_task(self.run())
+        await self._task
+
+    async def stop(self):
+        """Stops the behavior's run loop."""
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        self._task = None
+        print(f"[{self.__class__.__name__}] Stopped.")
+
+    @abstractmethod
     async def run(self):
-        """Execute search task"""
-        while not self.target_found:
-            # Get next waypoint from strategy
-            waypoint = self.strategy.next_waypoint()
+        """
+        The main logic loop for the behavior.
+        This method must be implemented by all concrete behaviors.
+        It should periodically check `self._running`.
+        """
+        pass
+
+# --- Concrete Behaviors ---
+
+class SearchBehavior(BaseBehavior):
+    """
+    Executes a search task.
+    Coordinates between a Strategy (to get waypoints) and a
+    Detector (to find the target).
+    """
+    async def run(self):
+        print(f"[SearchBehavior] Running...")
+        if not self.strategy or not self.detector:
+            print("[SearchBehavior] Error: Missing Strategy or Detector.")
+            self.mission_state.transition(MissionStateEnum.ABORTED)
+            return
+
+        while self._running:
+            # 1. Check for pause state
+            if self.mission_state.current == MissionStateEnum.PAUSED:
+                await asyncio.sleep(1)
+                continue
             
-            # Fly there
-            await self.hal.go_to(waypoint)
+            # 2. Get next waypoint from the injected Strategy
+            waypoint = await self.strategy.next_waypoint()
+            print(f"[SearchBehavior] Moving to waypoint: ({waypoint.x}, {waypoint.y}, {waypoint.z})")
             
-            # Scan with detector
+            # 3. Command the HAL to move to the waypoint
+            arrival_success = await self.hal.goto(waypoint)
+            if not arrival_success:
+                print(f"[SearchBehavior] Failed to reach waypoint.")
+                # Implement retry logic or abort
+                continue
+
+            # 4. At waypoint, use the injected Detector to look for target
+            print(f"[SearchBehavior] At waypoint, scanning for target...")
             detection = await self.detector.detect()
             
-            if detection:
-                # Signal with actuator
-                await self.actuator.execute("SIGNAL_FOUND")
-                self.target_found = True
-                return detection
+            if detection and detection.confidence > 0.9:
+                print(f"[SearchBehavior] *** Target Found! *** at {detection.position}")
+                # Transition mission state to CONFIRMING or DELIVERING
+                # This trigger will be caught by the MissionController
+                self.mission_state.transition(MissionStateEnum.CONFIRMING)
+                break # Exit the search loop
+            
+            # 5. Check for stop signal
+            if not self._running:
+                break
+            
+            await asyncio.sleep(0.1) # Yield control
 
-class BehaviorFactory:
-    """Creates behaviors from JSON task definitions"""
-    
-    def create(self, task_definition: dict):
-        behavior_class = self.get_behavior_class(task_definition['behavior'])
+        print("[SearchBehavior] Exiting run loop.")
+
+class DeliveryBehavior(BaseBehavior):
+    """
+    Executes a payload delivery task.
+    Coordinates between a Strategy (to get drop point) and an
+    Actuator (to release the payload).
+    """
+    async def run(self):
+        print(f"[DeliveryBehavior] Running...")
+        if not self.strategy or not self.actuator:
+            print("[DeliveryBehavior] Error: Missing Strategy or Actuator.")
+            self.mission_state.transition(MissionStateEnum.ABORTED)
+            return
+
+        while self._running:
+            # 1. Check for pause state
+            if self.mission_state.current == MissionStateEnum.PAUSED:
+                await asyncio.sleep(1)
+                continue
+                
+            # 2. Get the delivery/drop-off waypoint from the Strategy
+            drop_waypoint = await self.strategy.next_waypoint()
+            print(f"[DeliveryBehavior] Moving to drop point: ({drop_waypoint.x}, {drop_waypoint.y}, {drop_waypoint.z})")
+
+            # 3. Command the HAL to move to the drop point
+            arrival_success = await self.hal.goto(drop_waypoint)
+            if not arrival_success:
+                print(f"[DeliveryBehavior] Failed to reach drop point.")
+                continue
+
+            # 4. At drop point, command the injected Actuator to execute
+            print(f"[DeliveryBehavior] At drop point, executing payload release...")
+            release_success = await self.actuator.execute()
+            
+            if release_success:
+                print(f"[DeliveryBehavior] *** Payload Released Successfully! ***")
+                # This trigger will be caught by the MissionController
+                self.mission_state.transition(MissionStateEnum.RETURNING)
+            else:
+                print(f"[DeliveryBehavior] Payload release failed!")
+                # Implement retry logic or abort
+                self.mission_state.transition(MissionStateEnum.ABORTED)
+            
+            break # Delivery is usually a one-shot action
+
+        print("[DeliveryBehavior] Exiting run loop.")
+
+class RTHBehavior(BaseBehavior):
+    """
+    Executes a simple Return-to-Hub task.
+    Uses strategy for a home waypoint and HAL to fly there.
+    """
+    async def run(self):
+        print(f"[RTHBehavior] Running...")
+        if not self.strategy:
+            print("[RTHBehavior] Error: Missing Strategy for home position.")
+            # Failsafe: might need a hardcoded RTH in HAL
+            return
+
+        home_waypoint = await self.strategy.next_waypoint()
+        print(f"[RTHBehavior] Returning to Hub at: ({home_waypoint.x}, {home_waypoint.y}, {home_waypoint.z})")
         
-        # Create plugins based on JSON spec
-        detector = get_detector(task_definition.get('detector'))
-        strategy = get_strategy(task_definition.get('strategy'))
-        actuator = get_actuator(task_definition.get('actuator'))
+        await self.hal.goto(home_waypoint)
         
-        # Inject all dependencies
-        return behavior_class(
-            detector=detector,
-            strategy=strategy,
-            actuator=actuator,
-            flight_controller=self.flight_controller
-        )
+        print("[RTHBehavior] Arrived at Hub.")
+        self.mission_state.transition(MissionStateEnum.LANDING)
+
+# Add other behaviors as needed (Patrol, Standby, etc.)

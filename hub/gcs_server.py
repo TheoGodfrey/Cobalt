@@ -1,169 +1,114 @@
 """
-GCS (Ground Control Station) WebSocket Server.
-
-This server runs as part of the Coordinator and provides a link
-to a web-based frontend.
+GCS Server
+Runs a WebSocket server for the Ground Control Station (Web UI)
+to connect to.
 """
+
 import asyncio
 import json
+from time import time
 import websockets
-from typing import Set, TYPE_CHECKING
-
-# --- Robust Import Logic ---
-import sys
-from pathlib import Path
-FILE = Path(__file__).resolve()
-ROOT = FILE.parent.parent
-CORE_PATH = ROOT / "v_0_2" / "scout_drone"
-if str(CORE_PATH) not in sys.path:
-    sys.path.append(str(CORE_PATH))
-# --- End Import Logic ---
-
-from drone.core.config_models import GcsConfig  # <-- FIX: Corrected import
-from drone.core.drone import Telemetry         # <-- FIX: Corrected import
-from drone.core.position import Position       # <-- FIX: Added missing import
-
-# Forward declaration for type hinting
-if TYPE_CHECKING:
-    from .coordinator import Coordinator # Use relative import for type check
+from typing import Set, Optional
+from .fleet_coordinator import FleetCoordinator
 
 class GcsServer:
     """
-    Manages WebSocket communication with GCS clients.
+    Handles WebSocket connections from GCS clients.
+    - Receives commands from GCS (e.g., "LAUNCH_MISSION")
+    - Pushes fleet state to GCS
     """
     
-    # --- FIX: Changed __init__ to match coordinator_main.py ---
-    def __init__(self, config: GcsConfig):
-        self.config = config
-        self.controller: 'Coordinator' | None = None # Controller is set *after* init
-        self.clients: Set[websockets.WebSocketServerProtocol] = set()
-        print(f"[GcsServer] Initialized. Will listen on {config.host}:{config.port}")
-
-    def set_controller(self, controller: 'Coordinator'):
-        """Dependency injection for the Coordinator."""
-        self.controller = controller
-    # ---------------------------------------------------------
+    def __init__(self, fleet_coord: FleetCoordinator, host: str = "0.0.0.0", port: int = 8765):
+        self.fleet_coord = fleet_coord
+        self.host = host
+        self.port = port
+        self.connected_clients: Set[websockets.WebSocketServerProtocol] = set()
+        print(f"[GcsServer] Initialized. Will listen on {host}:{port}")
 
     async def _register(self, websocket: websockets.WebSocketServerProtocol):
         """Register a new GCS client."""
-        self.clients.add(websocket)
-        print(f"[GcsServer] Client connected: {websocket.remote_address}. Total clients: {len(self.clients)}")
+        self.connected_clients.add(websocket)
+        print(f"[GcsServer] GCS client connected: {websocket.remote_address}")
 
     async def _unregister(self, websocket: websockets.WebSocketServerProtocol):
         """Unregister a GCS client."""
-        self.clients.remove(websocket)
-        print(f"[GcsServer] Client disconnected: {websocket.remote_address}. Total clients: {len(self.clients)}")
+        self.connected_clients.remove(websocket)
+        print(f"[GcsServer] GCS client disconnected: {websocket.remote_address}")
 
-    async def _handle_message(self, message: str):
-        """Handle incoming messages from a GCS client."""
-        # --- FIX: Check if controller is set ---
-        if not self.controller:
-            print("[GcsServer] Error: Controller not set. Ignoring message.")
-            return
-        # -------------------------------------
-
+    async def _handle_message(self, websocket: websockets.WebSocketServerProtocol, message_str: str):
+        """Process incoming messages from a GCS client."""
         try:
-            data = json.loads(message)
-            msg_type = data.get('type')
+            message = json.loads(message_str)
+            command_type = message.get("type")
             
-            if msg_type == 'TRIGGER_MOB_MODE':
-                print("[GcsServer] Received TRIGGER_MOB_MODE from operator.")
-                await self.controller.trigger_mob_event()
-
-            elif msg_type == 'CONFIRM_TARGET':
-                drone_id = data.get('data', {}).get('drone_id')
-                print(f"[GcsServer] Received CONFIRM_TARGET from operator for {drone_id}.")
-                await self.controller.handle_operator_confirmation(drone_id)
-                
-            elif msg_type == 'REJECT_TARGET':
-                drone_id = data.get('data', {}).get('drone_id')
-                print(f"[GcsServer] Received REJECT_TARGET from operator for {drone_id}.")
-                await self.controller.handle_operator_rejection(drone_id)
+            print(f"[GcsServer] Received command: {command_type}")
             
-            elif msg_type == 'TRIGGER_PATROL_MODE':
-                print("[GcsServer] Received TRIGGER_PATROL_MODE from operator.")
-                await self.controller.trigger_patrol_mode()
+            if command_type == "LAUNCH_MISSION":
+                mission_file = message.get("mission_file")
+                if mission_file:
+                    # Run as a task so we don't block the server
+                    asyncio.create_task(
+                        self.fleet_coord.load_and_start_mission(mission_file)
+                    )
+                else:
+                    await websocket.send(json.dumps({"type": "ERROR", "message": "No mission_file provided"}))
+                    
+            elif command_type == "PING":
+                await websocket.send(json.dumps({"type": "PONG", "timestamp": time.monotonic()}))
             
-            elif msg_type == 'TRIGGER_OVERWATCH_MODE':
-                print("[GcsServer] Received TRIGGER_OVERWATCH_MODE from operator.")
-                # TODO: Get position from GCS click
-                default_pos = {"x": 100.0, "y": 100.0, "z": 0.0} 
-                pos_data = data.get('data', {"position": default_pos})
-                await self.controller.trigger_overwatch_mode(pos_data)
-
             else:
-                print(f"[GcsServer] Unknown message type: {msg_type}")
-                
+                await websocket.send(json.dumps({"type": "ERROR", "message": f"Unknown command {command_type}"}))
+
         except json.JSONDecodeError:
-            print(f"[GcsServer] Received invalid JSON: {message}")
+            print("[GcsServer] Received invalid JSON message")
+            await websocket.send(json.dumps({"type": "ERROR", "message": "Invalid JSON"}))
         except Exception as e:
             print(f"[GcsServer] Error handling message: {e}")
 
     async def _connection_handler(self, websocket: websockets.WebSocketServerProtocol, path: str):
-        """Handle a single client connection's lifecycle."""
+        """Handle a single client connection."""
         await self._register(websocket)
         try:
-            # Listen for incoming messages
             async for message in websocket:
-                await self._handle_message(str(message)) # FIX: Was self.handle_message
+                await self._handle_message(websocket, message)
         except websockets.exceptions.ConnectionClosed:
-            print(f"[GcsServer] Connection closed by client.")
+            pass
         finally:
             await self._unregister(websocket)
 
-    async def run(self):
-        """Start the WebSocket server."""
-        print(f"[GcsServer] Starting server on ws://{self.config.host}:{self.config.port}...")
-        try:
-            server = await websockets.serve(
-                self._connection_handler,
-                self.config.host,
-                self.config.port
-            )
-            await server.wait_closed()
-        except OSError as e:
-            print(f"[GcsServer] FATAL: Could not start server (port {self.config.port} likely in use). {e}")
-            raise
+    async def broadcast_state(self):
+        """Periodically broadcasts the fleet state to all connected GCS clients."""
+        while True:
+            await asyncio.sleep(1.0) # Broadcast every 1 second
             
-    async def broadcast(self, payload: dict):
-        """Send a JSON payload to all connected clients."""
-        if not self.clients:
-            return # No one to send to
-        
-        # Use default=vars to handle Pydantic models
-        message = json.dumps(payload, default=vars)
-        
-        # Use asyncio.gather to send to all clients concurrently
-        tasks = [client.send(message) for client in self.clients]
-        await asyncio.gather(*tasks, return_exceptions=True)
-        
-    async def broadcast_telemetry(self, drone_id: str, telemetry: Telemetry, state: str):
-        """Helper function to format and broadcast telemetry."""
-        
-        # --- FIX: `telemetry` object does not have `.id` ---
-        payload = {
-            "type": "telemetry",
-            "data": {
-                "drone_id": drone_id, # Use the passed-in drone_id
-                "position": telemetry.position.model_dump(), # Use model_dump()
-                "attitude": {
-                    "roll": round(telemetry.attitude_roll, 1),
-                    "pitch": round(telemetry.attitude_pitch, 1),
-                    "yaw": round(telemetry.attitude_yaw, 1),
-                },
-                "battery": round(telemetry.battery, 1),
-                "state": telemetry.state,
-                "mission_phase": state,
-            }
-        }
-        await self.broadcast(payload)
-        # -------------------------------------------------
+            if not self.connected_clients:
+                continue
+                
+            try:
+                snapshot = await self.fleet_coord.get_fleet_snapshot()
+                state_message = json.dumps({
+                    "type": "FLEET_STATE_UPDATE",
+                    "data": snapshot
+                }, default=str) # Use default=str for dataclasses/timestamps
+                
+                # Broadcast to all
+                await asyncio.wait([
+                    client.send(state_message) for client in self.connected_clients
+                ])
+            except Exception as e:
+                print(f"[GcsServer] Error broadcasting state: {e}")
 
-    async def broadcast_event(self, event_type: str, data: dict):
-        """Helper function to format and broadcast a special event."""
-        payload = {
-            "type": event_type,
-            "data": data
-        }
-        await self.broadcast(payload)
-
+    async def run(self):
+        """Starts the WebSocket server."""
+        print(f"[GcsServer] Starting server on ws://{self.host}:{self.port}")
+        
+        # Start the periodic state broadcaster
+        asyncio.create_task(self.broadcast_state())
+        
+        # Start the WebSocket server
+        server = await websockets.serve(
+            self._connection_handler,
+            self.host,
+            self.port
+        )
+        await server.wait_closed()
