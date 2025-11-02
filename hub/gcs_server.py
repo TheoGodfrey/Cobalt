@@ -74,6 +74,7 @@ class GcsServer:
         except websockets.exceptions.ConnectionClosed:
             pass
         finally:
+            # FIX: Added 'self.' to correct NameError
             await self._unregister(websocket)
 
     async def broadcast_state(self):
@@ -86,17 +87,21 @@ class GcsServer:
                 
             try:
                 snapshot = await self.fleet_coord.get_fleet_snapshot()
+                
+                # FIX: Removed default=str.
+                # This relies on get_fleet_snapshot() (Bug #10) 
+                # correctly returning a JSON-serializable dict.
                 state_message = json.dumps({
                     "type": "FLEET_STATE_UPDATE",
                     "data": snapshot
-                }, default=str) # Use default=str for dataclasses/timestamps
+                })
                 
                 # Broadcast to all
                 await asyncio.wait([
                     client.send(state_message) for client in self.connected_clients
                 ])
             except Exception as e:
-                print(f"[GcsServer] Error broadcasting state: {e}")
+                print(f"[GGcsServer] Error broadcasting state: {e}")
 
     async def run(self):
         """Starts the WebSocket server."""

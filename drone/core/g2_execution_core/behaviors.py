@@ -11,22 +11,16 @@ dependencies (plugins, HAL) via dependency injection.
 import asyncio
 from abc import ABC, abstractmethod
 from typing import Protocol, Optional, Any, Dict
+
+# --- Import correct data structures instead of placeholders ---
 from .mission_state import MissionState, MissionStateEnum
+from ..g1_mission_definition.phase import Task
+from ..g3_capability_plugins.detectors.base import Detection
+from ..g3_capability_plugins.strategies.base import Waypoint
 
 # --- Dependency Interface Definitions (using Protocols) ---
 # These define the interfaces that Behaviors expect from other components
 # (Detectors, Strategies, Actuators, HAL) without creating circular imports.
-
-class Detection:
-    """Placeholder for a detection object."""
-    def __init__(self, position: Any, confidence: float):
-        self.position = position
-        self.confidence = confidence
-
-class Waypoint:
-    """Placeholder for a waypoint object."""
-    def __init__(self, x: float, y: float, z: float):
-        self.x, self.y, self.z = x, y, z
 
 class Detector(Protocol):
     """Expected interface for a Detector plugin."""
@@ -227,3 +221,86 @@ class RTHBehavior(BaseBehavior):
         self.mission_state.transition(MissionStateEnum.LANDING)
 
 # Add other behaviors as needed (Patrol, Standby, etc.)
+
+
+# --- Behavior Factory ---
+# This class is the fix for Bug #1
+# It is responsible for creating the correct behavior based on the mission task
+
+class BehaviorFactory:
+    """
+    Instantiates and injects dependencies into the correct Behavior
+    based on a task definition.
+    """
+    def __init__(self, config: Dict[str, Any]):
+        """
+        Initializes the factory.
+        In a real system, this is where you would load all available
+        plugins (detectors, strategies, actuators).
+        """
+        # For now, we'll create them on the fly.
+        # A real system would use a plugin registry.
+        self.config = config
+        print("[BehaviorFactory] Initialized.")
+
+    def _get_plugins(self, task: Task, hal: HAL) -> Dict[str, Any]:
+        """
+        A helper to instantiate the plugins required by a task.
+        This is a simple implementation; a real one would be
+        more robust, loading plugins by name from a registry.
+        """
+        dependencies = {}
+        
+        # --- This part is still simulated ---
+        # A real implementation would look up these names in a
+        # plugin registry and instantiate the correct class.
+        
+        if task.detector:
+            # e.g., if task.detector == "thermal_detector":
+            # from ..g3_capability_plugins.detectors.thermal_detector import ThermalDetector
+            # dependencies["detector"] = ThermalDetector(hal.get_camera(0))
+            print(f"[BehaviorFactory] Mock loading Detector: {task.detector}")
+            
+        if task.strategy:
+            # e.g., if task.strategy == "lawnmower":
+            # from ..g3_capability_plugins.strategies.lawnmower import LawnmowerStrategy
+            # dependencies["strategy"] = LawnmowerStrategy(hal.vehicle_state, self.config.get('lawnmower_config'))
+            print(f"[BehaviorFactory] Mock loading Strategy: {task.strategy}")
+
+        if task.actuator:
+            # e.g., if task.actuator == "payload_dropper":
+            # from ..g3_capability_plugins.actuators.payload_dropper import PayloadDropper
+            # dependencies["actuator"] = PayloadDropper(hal.get_actuator_hardware(0))
+            print(f"[BehaviorFactory] Mock loading Actuator: {task.actuator}")
+            
+        # This is highly simplified. A real DI system is needed.
+        return dependencies
+
+    def create(self, 
+                 task: Task, 
+                 mission_state: MissionState, 
+                 hal: HAL) -> BaseBehavior:
+        """
+        Factory method to create a behavior instance.
+        """
+        
+        # 1. Get the required plugins for this task
+        # This is a placeholder for a real dependency injection system
+        dependencies = self._get_plugins(task, hal)
+
+        # 2. Instantiate the correct behavior based on the task action
+        action = task.action.upper()
+        
+        if action == "EXECUTE_SEARCH":
+            return SearchBehavior(mission_state, hal, dependencies)
+            
+        elif action == "EXECUTE_DELIVERY":
+            return DeliveryBehavior(mission_state, hal, dependencies)
+            
+        elif action == "EXECUTE_RTH":
+            return RTHBehavior(mission_state, hal, dependencies)
+        
+        # ... add other behaviors here ...
+        
+        else:
+            raise ValueError(f"Unknown behavior action: {task.action}")

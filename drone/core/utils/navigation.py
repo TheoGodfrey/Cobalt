@@ -5,7 +5,7 @@ import numpy as np
 import math
 from typing import Tuple
 from .position import Position
-from .drone import Telemetry
+from ..g4_platform_interface.vehicle_state import Telemetry
 from .config_models import CameraIntrinsics # <-- FIX: Was CameraIntrinsicsConfig
 
 class CameraIntrinsicsHelper: # <-- FIX: Renamed class to avoid conflict

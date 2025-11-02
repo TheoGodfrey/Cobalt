@@ -89,26 +89,18 @@ def validate_mission_data(data: Dict[str, Any]) -> None:
         MissionParseError: If validation fails.
     """
     try:
-        # Set default values if they are missing
-        jsonschema.Draft7Validator.check_schema(MISSION_SCHEMA)
-        validator = jsonschema.Draft7Validator(MISSION_SCHEMA)
+        # --- FIX for Bug #15 ---
+        # The original code had a non-functional loop and validated twice.
+        # The correct behavior is to apply defaults *before* validating.
         
-        # Fill in defaults
-        for error in sorted(validator.iter_errors(data), key=str):
-             if error.validator == 'required':
-                 # Handle missing required properties if needed, or let it fail
-                 pass
-        
-        # This handy function fills in defaults from the schema
-        validator.validate(data) # Re-validate after trying to set defaults if any
-        
-        # Manually apply defaults for root properties (jsonschema lib doesn't auto-fill)
+        # Manually apply defaults for root properties (as defined in schema)
         if 'is_alterable' not in data:
             data['is_alterable'] = MISSION_SCHEMA['properties']['is_alterable']['default']
         if 'hub_failsafe' not in data:
             data['hub_failsafe'] = MISSION_SCHEMA['properties']['hub_failsafe']['default']
 
-        # Re-run validation to be certain
+        # Now, validate the data (with defaults applied) against the schema.
+        # This single call checks for required fields, types, enums, etc.
         jsonschema.validate(instance=data, schema=MISSION_SCHEMA)
 
     except jsonschema.ValidationError as e:

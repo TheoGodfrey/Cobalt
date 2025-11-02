@@ -64,7 +64,12 @@ class ArduPilotController(BaseFlightController):
             config: A dictionary, typically from mission_config.yaml, containing
                     a 'connection_string' and 'camera_stream_url'.
         """
+        # Note: This file's __init__ does not call super().__init__(config),
+        # but it *does* match the base class signature (which Bug #7 fixed).
+        # We manually assign vehicle_state and config.
         self.vehicle_state = vehicle_state
+        self.config = config
+        
         self.connection_string = config.get('connection_string', DEFAULT_CONNECTION_STRING)
         
         # Assumes the video stream URL is separate from MAVLink
@@ -260,10 +265,17 @@ Deactivates listeners and closes the MAVLink connection.
         """
         return self.vehicle_state
 
-    def get_camera(self) -> BaseCamera:
+    # --- FIX for Bug #12 ---
+    # Added camera_id parameter to match the base class signature
+    def get_camera(self, camera_id: int) -> BaseCamera:
         """
         Returns an instance of the camera object.
+        NOTE: This implementation ignores camera_id and always returns
+        the primary camera.
         """
+        # TODO: Extend to support multiple cameras if camera_id > 0
+        if camera_id != 0:
+            log.warning(f"[HAL-ArduPilot] Requested camera {camera_id}, but only camera 0 is supported. Returning camera 0.")
         return self._camera
 
     # --- Listener Callbacks (Private) ---
@@ -332,4 +344,3 @@ Deactivates listeners and closes the MAVLink connection.
                 self.vehicle_state.status = DroneStatus.ERROR
             else:
                 self.vehicle_state.status = DroneStatus.UNKNOWN
-

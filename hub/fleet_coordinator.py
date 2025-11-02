@@ -8,7 +8,8 @@ and issues commands based on the master mission plan.
 """
 
 import asyncio
-from dataclasses import dataclass, field
+# FIX for Bug #10: Import asdict
+from dataclasses import dataclass, field, asdict
 from time import time
 from typing import Dict, Any, Optional, Set
 
@@ -17,7 +18,8 @@ from drone.core.cross_cutting.communication import MqttClient
 
 # We need the mission definition files (G1) to load
 from drone.core.g1_mission_definition.loader import load_mission_file
-from drone.core.g1_mission_definition.parser import parse_mission
+# FIX for Bug #9: Function is parse_mission_flow, not parse_mission
+from drone.core.g1_mission_definition.parser import parse_mission_flow
 from drone.core.g1_mission_definition.mission_flow import MissionFlow
 
 # Placeholder for a drone's state as tracked by the hub
@@ -108,7 +110,7 @@ class FleetCoordinator:
         # Subscribe to all detections
         asyncio.create_task(self.comms.subscribe("fleet/detections/+", self._handle_detections))
         
-        # Subscribe to drone disconnections
+        # Subscribe to drone disconnections (Bug #13)
         asyncio.create_task(self.comms.subscribe_lwt(self._handle_drone_lwt))
 
     async def load_and_start_mission(self, mission_file_path: str):
@@ -116,7 +118,8 @@ class FleetCoordinator:
         print(f"[FleetCoordinator] Loading mission: {mission_file_path}")
         try:
             mission_dict = load_mission_file(mission_file_path)
-            self.current_mission = parse_mission(mission_dict)
+            # FIX for Bug #9: Use parse_mission_flow
+            self.current_mission = parse_mission_flow(mission_dict)
         except Exception as e:
             print(f"[FleetCoordinator] FAILED to load mission: {e}")
             return
@@ -147,7 +150,8 @@ class FleetCoordinator:
                 command = {
                     "action": "EXECUTE_PHASE",
                     "phase": phase_name,
-                    "task": task.model_dump() # Send task config
+                    # FIX for Bug #10: Use asdict() instead of model_dump()
+                    "task": asdict(task) # Send task config
                 }
                 await self.comms.publish(f"fleet/commands/{drone_id}", command)
 
@@ -156,5 +160,6 @@ class FleetCoordinator:
         return {
             "mission_id": self.current_mission.mission_id if self.current_mission else "NONE",
             "confirmed_target": self.confirmed_target,
-            "drones": [state.model_dump() for state in self.fleet_state.values()]
+            # FIX for Bug #10: Use asdict() instead of model_dump()
+            "drones": [asdict(state) for state in self.fleet_state.values()]
         }

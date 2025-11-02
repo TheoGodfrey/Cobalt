@@ -2,196 +2,90 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale-1.0">
     <title>COBALT GCS</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+         crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+         crossorigin=""></script>
+         
+    <script src="https://cdn.jsdelivr.net/npm/leaflet-rotatedmarker@0.2.0/leaflet.rotatedMarker.min.js"></script>
+
     <style>
         body { font-family: 'Inter', sans-serif; }
+        /* FIX: Added explicit height for the map container, required by Leaflet */
+        #map { height: 400px; } 
     </style>
 </head>
 <body class="bg-gray-900 text-gray-100 p-8">
 
-    <div class="max-w-4xl mx-auto">
-        <h1 class="text-3xl font-bold text-cyan-400">COBALT GCS</h1>
-        <p class="text-lg text-gray-400 mb-6">Ground Control Station</p>
+    <div class="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
+        
+        <div class="lg:col-span-1 space-y-6">
+            <h1 class="text-3xl font-bold text-cyan-400">COBALT GCS</h1>
+            <p class="text-lg text-gray-400 -mt-2">Ground Control Station</p>
 
-        <div class="bg-gray-800 p-6 rounded-lg shadow-xl mb-6">
-            <h2 class="text-xl font-semibold mb-4">Mission Control</h2>
-            <div class="flex flex-col sm:flex-row sm:space-x-4 sm:items-end">
-                
-                <div class="flex-grow mb-4 sm:mb-0">
-                    <label for="missionFile" class="block text-sm font-medium text-gray-400 mb-1">Mission File Name</label>
-                    <input type="text" id="missionFile" value="mob_search_001.json" class="bg-gray-700 text-white w-full py-2 px-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500" />
+            <div class="bg-gray-800 p-6 rounded-lg shadow-xl">
+                <h2 class="text-xl font-semibold mb-4">Mission Control</h2>
+                <div class="flex flex-col sm:flex-row sm:space-x-4 sm:items-end">
+                    <div class="flex-grow mb-4 sm:mb-0">
+                        <label for="missionFile" class="block text-sm font-medium text-gray-400 mb-1">Mission File Name</label>
+                        <input type="text" id="missionFile" value="mob_search_001.json" class="bg-gray-700 text-white w-full py-2 px-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500" />
+                    </div>
                 </div>
+                <div class="flex space-x-4 mt-4">
+                    <button id="startMissionBtn" class="flex-1 bg-cyan-500 hover:bg-cyan-600 text-white font-bold py-2 px-4 rounded-lg transition duration-200">
+                        Start Mission
+                    </button>
+                    <button id="abortAllBtn" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition duration-200">
+                        ABORT ALL
+                    </button>
+                </div>
+            </div>
 
-                <button id="startMissionBtn" class="bg-cyan-500 hover:bg-cyan-600 text-white font-bold py-2 px-4 rounded-lg transition duration-200">
-                    Start Mission
-                </button>
-                <button id="abortAllBtn" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition duration-200 mt-2 sm:mt-0">
-                    ABORT ALL (RTH)
-                </button>
+            <div class="bg-gray-800 p-6 rounded-lg shadow-xl">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-semibold">System Status</h2>
+                    <div id="statusIndicator" class="w-4 h-4 rounded-full bg-red-500" title="Disconnected"></div>
+                </div>
+                <pre id="log" class="bg-gray-900 rounded-md p-4 h-64 overflow-y-auto text-sm font-mono whitespace-pre-wrap"></pre>
             </div>
         </div>
-        <div class="bg-gray-800 p-6 rounded-lg shadow-xl mb-6">
-            <div class="flex justify-between items-center mb-4">
-                <h2 class="text-xl font-semibold">System Status</h2>
-                <div id="statusIndicator" class="w-4 h-4 rounded-full bg-red-500" title="Disconnected"></div>
-            </div>
-            <pre id="log" class="bg-gray-900 rounded-md p-4 h-64 overflow-y-auto text-sm font-mono whitespace-pre-wrap"></pre>
-        </div>
 
-        <div class="bg-gray-800 p-6 rounded-lg shadow-xl">
-            <h2 class="text-xl font-semibold mb-4">Fleet Status</h2>
-            <div id="fleetList" class="space-y-4">
-                <p class="text-gray-500">No drones connected...</p>
+        <div class="lg:col-span-2 space-y-6">
+            
+            <div class="bg-gray-800 p-6 rounded-lg shadow-xl">
+                <h2 class="text-xl font-semibold mb-4">Map</h2>
+                <div id="map" class="bg-gray-700 rounded-lg z-0"></div>
+            </div>
+
+            <div class="bg-gray-800 p-6 rounded-lg shadow-xl">
+                <h2 class="text-xl font-semibold mb-4">Fleet Status</h2>
+                <div id="fleetList" class="space-y-4">
+                    <p class="text-gray-500">No drones connected...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="videoModal" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 hidden z-50">
+        <div class="bg-gray-800 rounded-lg shadow-xl w-full max-w-4xl">
+            <div class="flex justify-between items-center p-4 border-b border-gray-700">
+                <h2 id="videoTitle" class="text-xl font-semibold">Live Feed</h2>
+                <button id="closeVideoBtn" class="text-gray-400 hover:text-white text-3xl">&times;</button>
+            </div>
+            <div id="videoContainer" class="p-4 bg-black flex items-center justify-center min-h-[400px]">
+                <div class="loader"></div>
+                <p class="text-gray-500 ml-4">Attempting to connect to video stream...</p>
             </div>
         </div>
     </div>
 
-    <script>
-        const log = document.getElementById('log');
-        const statusIndicator = document.getElementById('statusIndicator');
-        const fleetList = document.getElementById('fleetList');
-        const startMissionBtn = document.getElementById('startMissionBtn');
-        const abortAllBtn = document.getElementById('abortAllBtn');
-        const missionFile = document.getElementById('missionFile'); // <-- Get the new input field
+    <script type="module" src="js/app.js"></script>
 
-        let ws;
-        const fleet = {}; // Object to store drone states
-
-        function connect() {
-            // Assumes GCS server is on port 8765
-            ws = new WebSocket('ws://' + window.location.hostname + ':8765');
-
-            ws.onopen = () => {
-                logMessage('GCS: Connected to Hub (WebSocket)');
-                statusIndicator.classList.remove('bg-red-500');
-                statusIndicator.classList.add('bg-green-500');
-                statusIndicator.title = 'Connected';
-            };
-
-            ws.onmessage = (event) => {
-                const msg = JSON.parse(event.data);
-                
-                // Log all messages
-                logMessage(`HUB: ${event.data}`);
-
-                // Update fleet status
-                if (msg.type === 'telemetry' || msg.type === 'lwt') {
-                    updateFleetStatus(msg.payload.drone_id, msg.payload);
-                } else if (msg.type === 'detection') {
-                    updateFleetStatus(msg.payload.drone_id, { 
-                        last_detection: msg.payload, 
-                        state: fleet[msg.payload.drone_id]?.state || 'UNKNOWN' 
-                    });
-                } else if (msg.type === 'phase_update') {
-                     updateFleetStatus(msg.payload.drone_id, { 
-                        state: msg.payload.phase_name,
-                        mission_state: msg.payload.mission_state
-                    });
-                }
-            };
-
-            ws.onclose = () => {
-                logMessage('GCS: Disconnected from Hub. Retrying in 3s...');
-                statusIndicator.classList.add('bg-red-500');
-                statusIndicator.classList.remove('bg-green-500');
-                statusIndicator.title = 'Disconnected';
-                setTimeout(connect, 3000);
-            };
-
-            ws.onerror = (err) => {
-                logMessage(`GCS: WebSocket error: ${err.message}`);
-                ws.close();
-            };
-        }
-
-        function logMessage(message) {
-            log.textContent = `[${new Date().toLocaleTimeString()}] ${message}\n` + log.textContent;
-        }
-
-        function updateFleetStatus(droneId, data) {
-            if (!fleet[droneId]) {
-                fleet[droneId] = {}; // Create new entry if not exists
-            }
-
-            // Update state
-            if (data.status) { // LWT message
-                fleet[droneId].state = data.status.toUpperCase();
-                fleet[droneId].lwt_timestamp = Date.now();
-            }
-            if (data.mission_state) { // From phase update
-                fleet[droneId].state = `${data.phase_name} (${data.mission_state})`;
-            }
-            if (data.battery_percent) { // Telemetry
-                fleet[droneId].battery = data.battery_percent;
-                fleet[droneId].position = `(${data.latitude.toFixed(4)}, ${data.longitude.toFixed(4)}) @ ${data.relative_altitude.toFixed(0)}m`;
-            }
-            if (data.last_detection) {
-                fleet[droneId].last_detection = `Found ${data.last_detection.class_label} (${data.last_detection.confidence.toFixed(2)})`;
-            }
-            
-            fleet[droneId].last_update = Date.now();
-            renderFleetList();
-        }
-
-        function renderFleetList() {
-            fleetList.innerHTML = ''; // Clear list
-            if (Object.keys(fleet).length === 0) {
-                 fleetList.innerHTML = '<p class="text-gray-500">No drones connected...</p>';
-                 return;
-            }
-
-            for (const droneId in fleet) {
-                const drone = fleet[droneId];
-                const stateColor = drone.state === 'online' ? 'text-green-400' : (drone.state === 'offline' ? 'text-red-400' : 'text-yellow-400');
-                
-                const html = `
-                    <div class="bg-gray-700 p-4 rounded-lg">
-                        <div class="flex justify-between items-center">
-                            <span class="text-lg font-bold">${droneId}</span>
-                            <span class="font-mono ${stateColor}">${drone.state || 'UNKNOWN'}</span>
-                        </div>
-                        <div class="text-sm text-gray-300 mt-2">
-                            ${drone.battery ? `<div><strong>Battery:</strong> ${drone.battery.toFixed(1)}%</div>` : ''}
-                            ${drone.position ? `<div><strong>Position:</strong> ${drone.position}</div>` : ''}
-                            ${drone.last_detection ? `<div class="text-cyan-300"><strong>Detection:</strong> ${drone.last_detection}</div>` : ''}
-                        </div>
-                    </div>
-                `;
-                fleetList.innerHTML += html;
-            }
-        }
-
-        // --- Send Commands ---
-        startMissionBtn.addEventListener('click', () => {
-            // FIX for Bug #18: Read mission ID from the input field
-            const missionId = missionFile.value;
-            if (!missionId) {
-                logMessage("GCS: Error - No mission file specified.");
-                return;
-            }
-            
-            const command = {
-                action: "START_MISSION",
-                mission_id: missionId // Use the dynamic value
-            };
-            ws.send(JSON.stringify(command));
-            logMessage(`GCS: Sent START_MISSION (${missionId}) command.`);
-        });
-
-        abortAllBtn.addEventListener('click', () => {
-            const command = {
-                action: "ABORT_ALL",
-                failsafe_action: "EXECUTE_RTH"
-            };
-            ws.send(JSON.stringify(command));
-            logMessage("GCS: Sent ABORT_ALL (RTH) command.");
-        });
-
-
-        // Start connection
-        connect();
-    </script>
 </body>
 </html>
