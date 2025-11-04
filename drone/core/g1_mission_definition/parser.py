@@ -51,7 +51,7 @@ MISSION_SCHEMA = {
                 "transitions": {
                     "type": "object",
                     "patternProperties": {
-                        "^on_(event|state):[a-z0-9_]+$": {
+                        "^on_(event|state|timeout):[a-z0-9_.]+$": { # Allow timeout with float
                             "type": "object",
                             "patternProperties": {
                                 "^[a-z0-9_]+$": {"type": "string", "pattern": "^goto:[a-z0-9_]+$"}
@@ -72,7 +72,13 @@ MISSION_SCHEMA = {
                 },
                 "detector": {"type": "string"},
                 "strategy": {"type": "string"},
-                "actuator": {"type": "string"}
+                "actuator": {"type": "string"},
+                # --- FIX: Allow a 'params' object in the JSON ---
+                "params": {
+                    "type": "object",
+                    "additionalProperties": { "type": "object" }
+                }
+                # --- End of FIX ---
             }
         }
     }
@@ -134,7 +140,10 @@ def parse_mission_flow(data: Dict[str, Any]) -> MissionFlow:
                     action=task_data["action"],
                     detector=task_data.get("detector"),
                     strategy=task_data.get("strategy"),
-                    actuator=task_data.get("actuator")
+                    actuator=task_data.get("actuator"),
+                    # --- FIX: Read the params from the JSON ---
+                    params=task_data.get("params", {})
+                    # --- End of FIX ---
                 )
             
             parsed_phases[phase_name] = Phase(

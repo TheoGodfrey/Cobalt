@@ -5,7 +5,7 @@ A Phase is a reusable building block of a mission.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
 @dataclass(frozen=True)
 class Task:
@@ -20,6 +20,12 @@ class Task:
     detector: Optional[str] = None
     strategy: Optional[str] = None
     actuator: Optional[str] = None
+
+    # --- FIX: Added params field to pass mission-specific config ---
+    # This allows the .json file to provide parameters, e.g.,
+    # "params": { "goto_target": { "target_x": 123, "target_y": 456 } }
+    params: Optional[Dict[str, Any]] = field(default_factory=dict)
+    # --- End of FIX ---
 
 @dataclass(frozen=True)
 class Phase:

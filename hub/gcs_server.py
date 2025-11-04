@@ -65,6 +65,9 @@ class GcsServer:
         except Exception as e:
             print(f"[GcsServer] Error handling message: {e}")
 
+    # --- FIX 1.5: GcsServer NameError ---
+    # The 'finally' block now correctly calls 'self._unregister'
+    # to prevent a NameError and ensure disconnected clients are cleaned up.
     async def _connection_handler(self, websocket: websockets.WebSocketServerProtocol, path: str):
         """Handle a single client connection."""
         await self._register(websocket)
@@ -76,6 +79,7 @@ class GcsServer:
         finally:
             # FIX: Added 'self.' to correct NameError
             await self._unregister(websocket)
+    # --- End of FIX 1.5 ---
 
     async def broadcast_state(self):
         """Periodically broadcasts the fleet state to all connected GCS clients."""
@@ -89,7 +93,7 @@ class GcsServer:
                 snapshot = await self.fleet_coord.get_fleet_snapshot()
                 
                 # FIX: Removed default=str.
-                # This relies on get_fleet_snapshot() (Bug #10) 
+                # This relies on get_fleet_snapshot() (Bug #10 / Fix 1.4) 
                 # correctly returning a JSON-serializable dict.
                 state_message = json.dumps({
                     "type": "FLEET_STATE_UPDATE",

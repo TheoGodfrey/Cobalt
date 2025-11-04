@@ -1,0 +1,68 @@
+# Main Configuration for COBALT System
+# Loaded by both drone/main.py and hub/hub_main.py
+
+# Fleet topology
+# Defines all drones the hub knows about.
+# The drone/main.py --id flag must match one of these.
+fleet:
+  scout_1:
+    role: "scout"
+    hal: "simulated" # 'simulated', 'ardupilot', 'dji', 'omniverse'
+    plugins:
+      - "thermal_detector"
+      - "lawnmower"
+  scout_2:
+    role: "scout"
+    hal: "simulated"
+    plugins:
+      - "thermal_detector"
+      - "lawnmower"
+  payload_1:
+    role: "payload"
+    hal: "simulated"
+    plugins:
+      - "payload_dropper"
+      - "lawnmower" # For flying to the drop point
+
+# Network configuration
+network:
+  mqtt_broker_host: "localhost" # Assumes mosquitto is running on the same machine
+  mqtt_broker_port: 1883
+  mqtt_user: null
+  mqtt_pass: null
+  
+  gcs_server_host: "0.0.0.0"
+  gcs_server_port: 8765
+
+# Simulation settings
+# Used by the 'simulated' HAL
+simulation:
+  flight_speed_ms: 10.0
+  start_lat: 44.5646
+  start_lon: -123.2821
+  target_lat: 44.5650
+  target_lon: -123.2830
+
+# Plugin specific configurations
+# These are loaded by the BehaviorFactory
+detectors:
+  thermal_detector:
+    threshold: 0.9
+
+strategies:
+  lawnmower:
+    origin_x: 0
+    origin_y: 0
+    width: 1000      # meters (total width of area on X-axis)
+    height: 1000     # meters (total height of area on Y-axis)
+    step: 50         # meters (distance between N-S legs)
+    altitude: -50    # meters (50m altitude)
+
+actuators:
+  payload_dropper:
+    release_time_sec: 2
+
+# Safety monitor configuration
+safety:
+  battery_low_threshold: 25.0
+  geofence_path: "drone/config/geofence.json" # (File doesn't exist, but shows setting)

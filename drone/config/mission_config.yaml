@@ -22,6 +22,8 @@ fleet:
     hal: "simulated"
     plugins:
       - "payload_dropper"
+      - "lawnmower"
+      - "thermal_detector"
 
 # Network configuration
 network:

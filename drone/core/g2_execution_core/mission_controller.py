@@ -35,6 +35,7 @@ class MissionController:
         # Track state change listeners for cleanup
         self._state_listeners = []
     
+    # ... existing get_my_role() ...
     # FIX for Bug #2: Implement get_my_role()
     def get_my_role(self) -> str:
         """
@@ -56,6 +57,7 @@ class MissionController:
         print(f"[MissionController] WARNING: Could not determine role from ID '{client_id}'. Defaulting to 'scout'.")
         return "scout"
 
+    # ... existing execute_mission() ...
     async def execute_mission(self):
         """Generic mission execution loop"""
         
@@ -311,14 +313,6 @@ class MissionController:
         """
         print(f"[MissionController] Monitoring for state changes: {[s[1] for s in state_triggers]}")
 
-        # --- FIX: First, check if the state is ALREADY correct ---
-        current_state_name = mission_state.current.name.upper()
-        for trigger_key, expected_state in state_triggers:
-            if current_state_name == expected_state.upper():
-                print(f"[MissionController] State trigger '{trigger_key}' is already active.")
-                return trigger_key
-        # --- End of FIX ---
-        
         # Create a future that resolves when the state changes
         state_future = asyncio.Future()
         
@@ -331,12 +325,24 @@ class MissionController:
                     if not state_future.done():
                         state_future.set_result(trigger_key)
         
+        # --- FIX 1.3: Add listener FIRST ---
         # Register the listener
         self.mission_state.add_listener(state_listener)
         self._state_listeners.append(state_listener)
+        # --- End of FIX 1.3 ---
+
+        # --- FIX 1.3: Check current state SECOND ---
+        current_state_name = mission_state.current.name.upper()
+        for trigger_key, expected_state in state_triggers:
+            if current_state_name == expected_state.upper():
+                print(f"[MissionController] State trigger '{trigger_key}' is already active.")
+                if not state_future.done():
+                    state_future.set_result(trigger_key) # Resolve immediately
+                break # No need to check others
+        # --- End of FIX 1.3 ---
         
         try:
-            # Wait for the state change
+            # Wait for the state change (will return immediately if future is already set)
             return await state_future
         finally:
             # Cleanup

@@ -6,15 +6,25 @@ This file initializes and runs all Tier 2 Hub services.
 import asyncio
 import os
 from drone.core.cross_cutting.communication import MqttClient
+# --- FIX 3.2: Import config loader ---
+from drone.core.utils.config_models import load_config
+# --- End of FIX 3.2 ---
 from .fleet_coordinator import FleetCoordinator
 from .gcs_server import GcsServer
 from .charging_monitor import ChargingMonitor
 from .satellite_relay import SatelliteRelay
 
 # --- Configuration ---
-MQTT_HOST = os.environ.get("MQTT_HOST", "localhost")
-MQTT_PORT = int(os.environ.get("MQTT_PORT", 1883))
-GCS_PORT = int(os.environ.get("GCS_PORT", 8765))
+# --- FIX 3.2: Load config from file ---
+CONFIG_FILE = os.environ.get("COBALT_CONFIG", "config/mission_config.yaml")
+config = load_config(CONFIG_FILE)
+network_config = config.get("network", {})
+fleet_config = config.get("fleet", {})
+
+MQTT_HOST = os.environ.get("MQTT_HOST", network_config.get("mqtt_broker_host", "localhost"))
+MQTT_PORT = int(os.environ.get("MQTT_PORT", network_config.get("mqtt_broker_port", 1883)))
+GCS_PORT = int(os.environ.get("GCS_PORT", network_config.get("gcs_server_port", 8765)))
+# --- End of FIX 3.2 ---
 
 async def main():
     """
@@ -23,13 +33,13 @@ async def main():
     
     # 1. Initialize Communication Layer
     # The Hub needs its own MQTT client to act as the master
-# 1. Initialize Communication Layer
-    # The Hub needs its own MQTT client to act as the master
     hub_comms = MqttClient(client_id="hub_master", host=MQTT_HOST, port=MQTT_PORT)
     await hub_comms.connect()
 
     # 2. Initialize Core Hub Components
-    fleet_coord = FleetCoordinator(hub_comms)
+    # --- FIX 3.2: Pass fleet_config to FleetCoordinator ---
+    fleet_coord = FleetCoordinator(hub_comms, fleet_config)
+    # --- End of FIX 3.2 ---
     gcs_server = GcsServer(fleet_coord, port=GCS_PORT)
     charging_mon = ChargingMonitor(num_pads=4)
     sat_relay = SatelliteRelay()

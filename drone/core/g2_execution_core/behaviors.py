@@ -274,22 +274,20 @@ class BehaviorFactory:
         if task.detector:
             try:
                 print(f"[BehaviorFactory] Loading Detector: {task.detector}")
-                
-                # Get camera hardware from HAL
                 camera = hal.get_camera(0)  # Use camera 0 by default
                 
-                # Get detector-specific configuration
-                detector_config = self._get_plugin_config("detectors", task.detector)
+                # --- FIX: Get merged config from YAML and JSON ---
+                detector_config = self._get_merged_plugin_config(
+                    "detectors", task.detector, task.params
+                )
+                # --- End of FIX ---
                 
-                # Use the factory function from Bug #2 fix
                 detector = get_detector(task.detector, camera, detector_config)
                 dependencies["detector"] = detector
-                
                 print(f"[BehaviorFactory] ✓ Detector '{task.detector}' loaded successfully")
                 
             except ValueError as e:
                 print(f"[BehaviorFactory] ✗ ERROR: Unknown detector type '{task.detector}': {e}")
-                # Don't add to dependencies if loading fails
             except Exception as e:
                 print(f"[BehaviorFactory] ✗ ERROR: Failed to load detector '{task.detector}': {e}")
         
@@ -297,17 +295,16 @@ class BehaviorFactory:
         if task.strategy:
             try:
                 print(f"[BehaviorFactory] Loading Strategy: {task.strategy}")
-                
-                # Get vehicle state from HAL
                 vehicle_state = hal.vehicle_state
                 
-                # Get strategy-specific configuration
-                strategy_config = self._get_plugin_config("strategies", task.strategy)
-                
-                # Use the factory function from Bug #2 fix
+                # --- FIX: Get merged config from YAML and JSON ---
+                strategy_config = self._get_merged_plugin_config(
+                    "strategies", task.strategy, task.params
+                )
+                # --- End of FIX ---
+
                 strategy = get_strategy(task.strategy, vehicle_state, strategy_config)
                 dependencies["strategy"] = strategy
-                
                 print(f"[BehaviorFactory] ✓ Strategy '{task.strategy}' loaded successfully")
                 
             except ValueError as e:
@@ -319,17 +316,16 @@ class BehaviorFactory:
         if task.actuator:
             try:
                 print(f"[BehaviorFactory] Loading Actuator: {task.actuator}")
-                
-                # Get actuator hardware from HAL
                 actuator_hardware = hal.get_actuator_hardware(0)  # Use actuator 0 by default
                 
-                # Get actuator-specific configuration
-                actuator_config = self._get_plugin_config("actuators", task.actuator)
+                # --- FIX: Get merged config from YAML and JSON ---
+                actuator_config = self._get_merged_plugin_config(
+                    "actuators", task.actuator, task.params
+                )
+                # --- End of FIX ---
                 
-                # Use the factory function from Bug #2 fix
                 actuator = get_actuator(task.actuator, actuator_hardware, actuator_config)
                 dependencies["actuator"] = actuator
-                
                 print(f"[BehaviorFactory] ✓ Actuator '{task.actuator}' loaded successfully")
                 
             except ValueError as e:
@@ -339,39 +335,44 @@ class BehaviorFactory:
         
         return dependencies
     
-    def _get_plugin_config(self, plugin_category: str, plugin_name: str) -> Dict[str, Any]:
+    # --- FIX: Renamed and updated function to merge configs ---
+    def _get_merged_plugin_config(self, 
+                                 plugin_category: str, 
+                                 plugin_name: str, 
+                                 mission_params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Retrieves configuration for a specific plugin from the main config.
-        
-        This method looks for plugin configuration in the following locations (in order):
-        1. config[plugin_category][plugin_name]  (e.g., config["strategies"]["lawnmower"])
-        2. config["plugins"][plugin_name]         (e.g., config["plugins"]["lawnmower"])
-        3. Empty dict (default)
+        Retrieves configuration for a plugin, merging system defaults
+        with mission-specific parameters.
+
+        Mission-specific parameters (from the .json) will
+        overwrite system defaults (from the .yaml).
         
         Args:
-            plugin_category: Category of plugin ("detectors", "strategies", "actuators")
-            plugin_name: Name of the specific plugin (e.g., "thermal_detector")
+            plugin_category: Category ("detectors", "strategies", "actuators")
+            plugin_name: Name of the plugin (e.g., "goto_target")
+            mission_params: The 'params' dictionary from the Task
             
         Returns:
-            Configuration dictionary for the plugin
+            A final, merged configuration dictionary
         """
-        # Try category-specific config first
+        
+        # 1. Get default config from mission_config.yaml
+        default_config = {}
         if plugin_category in self.config:
             if plugin_name in self.config[plugin_category]:
-                config = self.config[plugin_category][plugin_name]
-                print(f"[BehaviorFactory] Using config from '{plugin_category}.{plugin_name}'")
-                return config
+                default_config = self.config[plugin_category][plugin_name]
+                print(f"[BehaviorFactory] Loaded default config from '{plugin_category}.{plugin_name}'")
+
+        # 2. Get mission-specific config from the .json 'params' block
+        mission_specific_config = mission_params.get(plugin_name, {})
+        if mission_specific_config:
+             print(f"[BehaviorFactory] Found mission-specific config for '{plugin_name}'")
+
+        # 3. Merge them (mission config overwrites defaults)
+        final_config = {**default_config, **mission_specific_config}
         
-        # Try generic plugins section
-        if "plugins" in self.config:
-            if plugin_name in self.config["plugins"]:
-                config = self.config["plugins"][plugin_name]
-                print(f"[BehaviorFactory] Using config from 'plugins.{plugin_name}'")
-                return config
-        
-        # Default to empty config
-        print(f"[BehaviorFactory] No config found for '{plugin_name}', using defaults")
-        return {}
+        return final_config
+    # --- End of FIX ---
 
     def create(self, 
                  task: Task, 
@@ -398,7 +399,6 @@ class BehaviorFactory:
         print(f"[BehaviorFactory] Creating behavior for action: {task.action}")
         
         # 1. Get the required plugins for this task
-        # This now actually loads plugins (Bug #6 fix)
         dependencies = self._get_plugins(task, hal)
         
         # 2. Validate that required plugins were loaded

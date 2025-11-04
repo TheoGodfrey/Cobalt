@@ -15,6 +15,8 @@ from .detectors.base import BaseDetector, Camera
 # Import concrete strategy implementations
 from .strategies.lawnmower import LawnmowerStrategy
 from .strategies.base import BaseStrategy, VehicleState
+# --- ADDED THIS IMPORT ---
+from .strategies.goto_target_strategy import GoToTargetStrategy
 
 # Import concrete actuator implementations
 from .actuators.payload_dropper import PayloadDropper
@@ -87,18 +89,20 @@ def get_strategy(strategy_type: str, vehicle_state: VehicleState, config: Option
     if strategy_type == "lawnmower":
         return LawnmowerStrategy(vehicle_state, config)
     
+    # --- ADDED THIS SECTION ---
+    elif strategy_type == "goto_target":
+        return GoToTargetStrategy(vehicle_state, config)
+    # --- END OF ADDED SECTION ---
+
     # Add more strategy types here as they are implemented
     # elif strategy_type == "orbit":
     #     return OrbitStrategy(vehicle_state, config)
-    # elif strategy_type == "probabilistic_3d":
-    #     return Probabilistic3DStrategy(vehicle_state, config)
-    # elif strategy_type == "random":
-    #     return RandomStrategy(vehicle_state, config)
     
     else:
+        # --- UPDATED THE ERROR MESSAGE ---
         raise ValueError(
             f"Unknown strategy type: '{strategy_type}'. "
-            f"Available types: lawnmower"
+            f"Available types: lawnmower, goto_target"
         )
 
 
@@ -129,8 +133,6 @@ def get_actuator(actuator_type: str, hardware: ActuatorHardware, config: Optiona
     # Add more actuator types here as they are implemented
     # elif actuator_type == "winch":
     #     return WinchActuator(hardware, config)
-    # elif actuator_type == "led_controller":
-    #     return LEDController(hardware, config)
     
     else:
         raise ValueError(

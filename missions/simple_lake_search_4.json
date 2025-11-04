@@ -1,0 +1,63 @@
+{
+  "mission_id": "lake_test_001",
+  "mission_name": "Lake Test: Search, Confirm, Deliver, RTB",
+  "start_phase": "searching",
+  "hub_failsafe": "RTH",
+  "phases": {
+    "searching": {
+      "tasks": {
+        "payload": {
+          "action": "EXECUTE_SEARCH",
+          "detector": "thermal_detector",
+          "strategy": "lawnmower"
+        }
+      },
+      "transitions": {
+        "on_state:CONFIRMING": {
+          "payload": "goto:delivering"
+        }
+      }
+    },
+    "delivering": {
+      "tasks": {
+        "payload": {
+          "action": "EXECUTE_DELIVERY",
+          "actuator": "payload_dropper",
+          "strategy": "goto_target",
+          "params": {
+            "goto_target": {
+              "target_x": 500.0,
+              "target_y": 500.0,
+              "altitude": -15.0
+            }
+          }
+        }
+      },
+      "transitions": {
+        "on_state:RETURNING": {
+          "payload": "goto:returning"
+        }
+      }
+    },
+    "returning": {
+      "tasks": {
+        "payload": {
+          "action": "EXECUTE_RTH",
+          "strategy": "rth_strategy"
+        }
+      },
+      "transitions": {
+        "on_state:LANDING": {
+          "payload": "goto:mission_complete"
+        }
+      }
+    },
+    "mission_complete": {
+      "tasks": {
+        "payload": {
+          "action": "IGNORE"
+        }
+      }
+    }
+  }
+}

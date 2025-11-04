@@ -49,6 +49,14 @@ class Telemetry:
     is_armed: bool = False
     wind_speed: float = 0.0
     wind_direction: float = 0.0
+    
+    # --- FIX 1.1: Added attitude fields for geolocation ---
+    # These are required by core/utils/navigation.py
+    # 
+    attitude_roll: float = 0.0  # In degrees
+    attitude_pitch: float = 0.0 # In degrees
+    attitude_yaw: float = 0.0   # In degrees
+    # --- End of FIX 1.1 ---
 
 # Type alias for a listener: Callable[[Telemetry], None]
 TelemetryChangeListener = Callable[[Telemetry], None]
@@ -128,3 +136,4 @@ class VehicleState:
             f"Batt: {self.battery_percent:.1f}%, "
             f"Pos: {self.position.x}, {self.position.y}, {self.position.z})"
         )
+

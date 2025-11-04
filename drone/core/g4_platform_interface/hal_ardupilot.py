@@ -9,6 +9,7 @@ flight controller, such as the one in the SplashDrone 4+.
 
 import time
 import logging
+import math  # <-- FIX 1.1: Added math for radian conversion
 from typing import Optional, Callable
 from dronekit import connect, VehicleMode, LocationGlobalRelative, APIException
 from .hal import BaseFlightController
@@ -309,9 +310,20 @@ class ArduPilotController(BaseFlightController):
             # the Waypoint with Lat/Lon/Alt.
             pos = Waypoint(x=loc.lat, y=loc.lon, z=loc.alt, yaw=telem.position.yaw)
         
-        # --- Get Attitude (for yaw) ---
+        # --- FIX 1.1: Get full attitude ---
+        # Get defaults from current state
+        att_roll = telem.attitude_roll
+        att_pitch = telem.attitude_pitch
+        att_yaw = telem.attitude_yaw
+        
+        # Overwrite with new data if available
         if self.vehicle.attitude:
-            pos.yaw = self.vehicle.attitude.yaw
+            # Convert from radians (dronekit) to degrees (our spec)
+            att_roll = math.degrees(self.vehicle.attitude.roll)
+            att_pitch = math.degrees(self.vehicle.attitude.pitch)
+            att_yaw = math.degrees(self.vehicle.attitude.yaw)
+            pos.yaw = att_yaw # Also update yaw in Waypoint for consistency
+        # --- End of FIX 1.1 ---
 
         # --- Get Battery ---
         batt = telem.battery_percent
@@ -364,7 +376,11 @@ class ArduPilotController(BaseFlightController):
             battery_percent=batt,
             is_armed=armed,
             wind_speed=self.vehicle.wind_estimation.speed if self.vehicle.wind_estimation else 0,
-            wind_direction=self.vehicle.wind_estimation.direction if self.vehicle.wind_estimation else 0
+            wind_direction=self.vehicle.wind_estimation.direction if self.vehicle.wind_estimation else 0,
+            # --- FIX 1.1: Add new fields to constructor ---
+            attitude_roll=att_roll,
+            attitude_pitch=att_pitch,
+            attitude_yaw=att_yaw
         )
         
         self.vehicle_state.update(new_telemetry)
@@ -396,3 +412,4 @@ class ArduPilotController(BaseFlightController):
     def _gps_callback(self, vehicle, attr_name, msg):
         if msg:
             self._update_full_telemetry()
+

@@ -34,6 +34,7 @@ async def main():
         description='COBALT Drone Mission Controller',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    # ... existing parser arguments ...
     parser.add_argument('--id', required=True, 
                        help='Drone ID (e.g., scout_1, payload_1)')
     parser.add_argument('--mission', required=True, 
@@ -48,7 +49,7 @@ async def main():
     args = parser.parse_args()
     
     # ====================================================================================
-    # FIX for Bug #10: Create MissionLogger with drone_id
+    # ... existing logger setup ...
     # ====================================================================================
     logger = MissionLogger(
         log_dir=args.log_dir,
@@ -92,29 +93,36 @@ async def main():
         await mqtt.connect()
         logger.log("MQTT connection established", "info")
         
-        # 4. Create safety monitor
-        safety_config = config.get('safety', {})
-        safety_monitor = SafetyMonitor(
-            config=safety_config,
-            mqtt=mqtt,
-            mission_state=None,  # Will be set by MissionController
-            vehicle_state=vehicle_state
-        )
-        logger.log("Safety monitor initialized", "info")
+        # --- FIX 1.2: Re-ordered initialization ---
         
-        # 5. Create mission controller
+        # 5. Create mission controller FIRST (so mission_state exists)
         logger.log("Initializing mission controller...", "info")
         controller = MissionController(
             mission_flow=mission_flow,
             flight_controller=flight_controller,
             vehicle_state=vehicle_state,
             mqtt=mqtt,
-            safety_monitor=safety_monitor,
+            safety_monitor=None,  # Pass None for now
             config=config
         )
         
-        # Link the mission_state to the safety monitor
-        safety_monitor.mission_state = controller.mission_state
+        # 4. Create safety monitor SECOND
+        logger.log("Initializing safety monitor...", "info")
+        safety_config = config.get('safety', {})
+        safety_monitor = SafetyMonitor(
+            config=safety_config,
+            mqtt=mqtt,
+            mission_state=controller.mission_state,  # <-- Pass the *existing* instance
+            vehicle_state=vehicle_state
+        )
+        
+        # Now, link the safety_monitor back to the controller
+        controller.safety_monitor = safety_monitor
+        
+        # The old line below is no longer needed, as it's done in the constructor
+        # safety_monitor.mission_state = controller.mission_state
+        
+        # --- End of FIX 1.2 ---
         
         logger.log("=" * 70, "info")
         logger.log(f"MISSION START: {mission_flow.mission_id}", "info")
@@ -130,7 +138,7 @@ async def main():
         logger.log("MISSION COMPLETE", "info")
         logger.log("=" * 70, "info")
         
-        # Log mission summary
+        # ... existing summary logging ...
         summary = {
             "Mission ID": mission_flow.mission_id,
             "Drone ID": args.id,
@@ -151,7 +159,7 @@ async def main():
         raise
         
     finally:
-        # Cleanup
+        # ... existing cleanup ...
         try:
             if 'mqtt' in locals():
                 await mqtt.disconnect()
