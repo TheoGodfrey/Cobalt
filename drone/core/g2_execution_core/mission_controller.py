@@ -3,7 +3,7 @@ Component 3: Mission Controller
 Generic flow interpreter - NO mission-specific logic
 """
 import asyncio
-from typing import Optional, Dict, Set, Any, List  # NEW: Added List
+from typing import Optional, Dict, Set, Any, List # NEW: Added List
 from ..g1_mission_definition.mission_flow import MissionFlow
 # Import the enum as well to map strings to enum members
 from ..g2_execution_core.mission_state import (
@@ -17,7 +17,7 @@ class MissionController:
     
     def __init__(self, mission_flow: MissionFlow, flight_controller, 
                  vehicle_state, mqtt, safety_monitor, config, 
-                 hardware_list: List[str]):  # NEW: Added hardware_list
+                 hardware_list: List[str]): # NEW: Added hardware_list
         self.mission_flow = mission_flow
         self.mission_state = MissionState()
         self.flight_controller = flight_controller
@@ -25,7 +25,7 @@ class MissionController:
         self.mqtt = mqtt
         self.safety_monitor = safety_monitor
         self.config = config
-        self.hardware_list = hardware_list  # NEW: Store hardware_list
+        self.hardware_list = hardware_list # NEW: Store hardware_list
         
         # This assumes BehaviorFactory is implemented in behaviors.py (Bug #1)
         # NEW: Pass hardware_list to factory
@@ -390,3 +390,4 @@ class MissionController:
         async with self._event_lock:
             self._triggered_events.add(trigger_key)
         print(f"[MissionController] Event manually triggered: {event_name}")
+

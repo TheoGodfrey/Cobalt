@@ -6,11 +6,13 @@ This file defines the abstract BaseBehavior and concrete implementations
 (e.g., SearchBehavior, DeliveryBehavior) as specified in the COBALT architecture.
 Behaviors are instantiated by the MissionController and receive their
 dependencies (plugins, HAL) via dependency injection.
+
+REFACTOR: Added hardware_list dependency injection.
 """
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Protocol, Optional, Any, Dict, List  # NEW: Added List
+from typing import Protocol, Optional, Any, Dict, List # NEW: Added List
 
 # --- Import correct data structures instead of placeholders ---
 from .mission_state import MissionState, MissionStateEnum
@@ -22,9 +24,7 @@ from ..g3_capability_plugins.strategies.base import Waypoint
 from ..g3_capability_plugins import get_detector, get_strategy, get_actuator
 
 # --- Dependency Interface Definitions (using Protocols) ---
-# These define the interfaces that Behaviors expect from other components
-# (Detectors, Strategies, Actuators, HAL) without creating circular imports.
-
+# ... (existing protocols Detector, Strategy, Actuator, HAL) ...
 class Detector(Protocol):
     """Expected interface for a Detector plugin."""
     async def detect(self) -> Optional[Detection]:
@@ -45,12 +45,18 @@ class HAL(Protocol):
     async def goto(self, waypoint: Waypoint) -> bool: # Returns True on arrival
         ...
     
-    async def get_position(self) -> Waypoint:
+    # FIX: Add all methods from hal.py that are used
+    async def land(self) -> bool:
         ...
     
-    # NEW: Add vehicle_state property to HAL protocol
+    def get_camera(self, camera_id: int) -> Any: # Returns a Camera protocol object
+        ...
+        
+    def get_actuator_hardware(self, actuator_id: int) -> Any: # Returns ActuatorHardware protocol
+        ...
+        
     @property
-    def vehicle_state(self) -> Any: # Using Any to avoid new import
+    def vehicle_state(self) -> Any: # Returns a VehicleState protocol object
         ...
 
 # --- Base Behavior ---
@@ -88,7 +94,10 @@ class BaseBehavior(ABC):
             return
         self._running = True
         self._task = asyncio.create_task(self.run())
-        await self._task
+        # FIX: Don't await the task here, let it run in the background
+        # await self._task 
+        print(f"[{self.__class__.__name__}] Started.")
+
 
     async def stop(self):
         """Stops the behavior's run loop."""
@@ -126,41 +135,47 @@ class SearchBehavior(BaseBehavior):
             self.mission_state.transition(MissionStateEnum.ABORTED)
             return
 
-        while self._running:
-            # 1. Check for pause state
-            if self.mission_state.current == MissionStateEnum.PAUSED:
-                await asyncio.sleep(1)
-                continue
-            
-            # 2. Get next waypoint from the injected Strategy
-            waypoint = await self.strategy.next_waypoint()
-            print(f"[SearchBehavior] Moving to waypoint: ({waypoint.x}, {waypoint.y}, {waypoint.z})")
-            
-            # 3. Command the HAL to move to the waypoint
-            arrival_success = await self.hal.goto(waypoint)
-            if not arrival_success:
-                print(f"[SearchBehavior] Failed to reach waypoint.")
-                # Implement retry logic or abort
-                continue
+        try:
+            while self._running:
+                # 1. Check for pause state
+                if self.mission_state.current == MissionStateEnum.PAUSED:
+                    await asyncio.sleep(1)
+                    continue
+                
+                # 2. Get next waypoint from the injected Strategy
+                waypoint = await self.strategy.next_waypoint()
+                print(f"[SearchBehavior] Moving to waypoint: ({waypoint.x}, {waypoint.y}, {waypoint.z})")
+                
+                # 3. Command the HAL to move to the waypoint
+                arrival_success = await self.hal.goto(waypoint)
+                if not arrival_success:
+                    print(f"[SearchBehavior] Failed to reach waypoint.")
+                    # Implement retry logic or abort
+                    continue
 
-            # 4. At waypoint, use the injected Detector to look for target
-            print(f"[SearchBehavior] At waypoint, scanning for target...")
-            detection = await self.detector.detect()
-            
-            if detection and detection.confidence > 0.9:
-                print(f"[SearchBehavior] *** Target Found! *** at {detection.position}")
-                # Transition mission state to CONFIRMING or DELIVERING
-                # This trigger will be caught by the MissionController
-                self.mission_state.transition(MissionStateEnum.CONFIRMING)
-                break # Exit the search loop
-            
-            # 5. Check for stop signal
-            if not self._running:
-                break
-            
-            await asyncio.sleep(0.1) # Yield control
-
-        print("[SearchBehavior] Exiting run loop.")
+                # 4. At waypoint, use the injected Detector to look for target
+                print(f"[SearchBehavior] At waypoint, scanning for target...")
+                detection = await self.detector.detect()
+                
+                if detection and detection.confidence > 0.9:
+                    print(f"[SearchBehavior] *** Target Found! *** at {detection.position}")
+                    # Transition mission state to CONFIRMING or DELIVERING
+                    # This trigger will be caught by the MissionController
+                    self.mission_state.transition(MissionStateEnum.CONFIRMING)
+                    break # Exit the search loop
+                
+                # 5. Check for stop signal
+                if not self._running:
+                    break
+                
+                await asyncio.sleep(0.1) # Yield control
+        except asyncio.CancelledError:
+            print("[SearchBehavior] Canceled.")
+        except Exception as e:
+            print(f"[SearchBehavior] CRITICAL ERROR in run loop: {e}")
+            self.mission_state.transition(MissionStateEnum.ABORTED)
+        finally:
+            print("[SearchBehavior] Exiting run loop.")
 
 class DeliveryBehavior(BaseBehavior):
     """
@@ -175,38 +190,44 @@ class DeliveryBehavior(BaseBehavior):
             self.mission_state.transition(MissionStateEnum.ABORTED)
             return
 
-        while self._running:
-            # 1. Check for pause state
-            if self.mission_state.current == MissionStateEnum.PAUSED:
-                await asyncio.sleep(1)
-                continue
+        try:
+            while self._running:
+                # 1. Check for pause state
+                if self.mission_state.current == MissionStateEnum.PAUSED:
+                    await asyncio.sleep(1)
+                    continue
+                    
+                # 2. Get the delivery/drop-off waypoint from the Strategy
+                drop_waypoint = await self.strategy.next_waypoint()
+                print(f"[DeliveryBehavior] Moving to drop point: ({drop_waypoint.x}, {drop_waypoint.y}, {drop_waypoint.z})")
+
+                # 3. Command the HAL to move to the drop point
+                arrival_success = await self.hal.goto(drop_waypoint)
+                if not arrival_success:
+                    print(f"[DeliveryBehavior] Failed to reach drop point.")
+                    continue
+
+                # 4. At drop point, command the injected Actuator to execute
+                print(f"[DeliveryBehavior] At drop point, executing payload release...")
+                release_success = await self.actuator.execute()
                 
-            # 2. Get the delivery/drop-off waypoint from the Strategy
-            drop_waypoint = await self.strategy.next_waypoint()
-            print(f"[DeliveryBehavior] Moving to drop point: ({drop_waypoint.x}, {drop_waypoint.y}, {drop_waypoint.z})")
-
-            # 3. Command the HAL to move to the drop point
-            arrival_success = await self.hal.goto(drop_waypoint)
-            if not arrival_success:
-                print(f"[DeliveryBehavior] Failed to reach drop point.")
-                continue
-
-            # 4. At drop point, command the injected Actuator to execute
-            print(f"[DeliveryBehavior] At drop point, executing payload release...")
-            release_success = await self.actuator.execute()
-            
-            if release_success:
-                print(f"[DeliveryBehavior] *** Payload Released Successfully! ***")
-                # This trigger will be caught by the MissionController
-                self.mission_state.transition(MissionStateEnum.RETURNING)
-            else:
-                print(f"[DeliveryBehavior] Payload release failed!")
-                # Implement retry logic or abort
-                self.mission_state.transition(MissionStateEnum.ABORTED)
-            
-            break # Delivery is usually a one-shot action
-
-        print("[DeliveryBehavior] Exiting run loop.")
+                if release_success:
+                    print(f"[DeliveryBehavior] *** Payload Released Successfully! ***")
+                    # This trigger will be caught by the MissionController
+                    self.mission_state.transition(MissionStateEnum.RETURNING)
+                else:
+                    print(f"[DeliveryBehavior] Payload release failed!")
+                    # Implement retry logic or abort
+                    self.mission_state.transition(MissionStateEnum.ABORTED)
+                
+                break # Delivery is usually a one-shot action
+        except asyncio.CancelledError:
+            print("[DeliveryBehavior] Canceled.")
+        except Exception as e:
+            print(f"[DeliveryBehavior] CRITICAL ERROR in run loop: {e}")
+            self.mission_state.transition(MissionStateEnum.ABORTED)
+        finally:
+            print("[DeliveryBehavior] Exiting run loop.")
 
 class RTHBehavior(BaseBehavior):
     """
@@ -218,29 +239,36 @@ class RTHBehavior(BaseBehavior):
         if not self.strategy:
             print("[RTHBehavior] Error: Missing Strategy for home position.")
             # Failsafe: might need a hardcoded RTH in HAL
+            self.mission_state.transition(MissionStateEnum.ABORTED)
             return
 
-        home_waypoint = await self.strategy.next_waypoint()
-        print(f"[RTHBehavior] Returning to Hub at: ({home_waypoint.x}, {home_waypoint.y}, {home_waypoint.z})")
-        
-        await self.hal.goto(home_waypoint)
-        
-        print("[RTHBehavior] Arrived at Hub. Now landing...")
-        
-        # --- FIX: Actually call the land function ---
-        # (This was already correct in the provided file)
-        await self.hal.land()
-        # --- End of Fix ---
-        
-        print("[RTHBehavior] Landed.")
-        self.mission_state.transition(MissionStateEnum.LANDING)
+        try:
+            home_waypoint = await self.strategy.next_waypoint()
+            print(f"[RTHBehavior] Returning to Hub at: ({home_waypoint.x}, {home_waypoint.y}, {home_waypoint.z})")
+            
+            await self.hal.goto(home_waypoint)
+            
+            print("[RTHBehavior] Arrived at Hub. Now landing...")
+            
+            # --- FIX: Actually call the land function ---
+            await self.hal.land()
+            # --- End of Fix ---
+            
+            print("[RTHBehavior] Landed.")
+            self.mission_state.transition(MissionStateEnum.LANDING)
+        except asyncio.CancelledError:
+            print("[RTHBehavior] Canceled.")
+        except Exception as e:
+            print(f"[RTHBehavior] CRITICAL ERROR in run loop: {e}")
+            self.mission_state.transition(MissionStateEnum.ABORTED)
+        finally:
+            print("[RTHBehavior] Exiting run loop.")
 
 # Add other behaviors as needed (Patrol, Standby, etc.)
 
 
 # ====================================================================================
 # FIX for Bug #6: Complete BehaviorFactory Implementation
-# REFACTOR: Added hardware_list
 # ====================================================================================
 
 class BehaviorFactory:
@@ -251,19 +279,21 @@ class BehaviorFactory:
     This factory uses the plugin factory functions (Bug #2 fix) to
     actually load and configure plugins instead of just printing mock messages.
     """
-    def __init__(self, config: Dict[str, Any], hardware_list: List[str]):  # NEW: Added hardware_list
+    # NEW: Accept hardware_list in constructor
+    def __init__(self, config: Dict[str, Any], hardware_list: List[str]):
         """
         Initializes the factory with configuration.
         
         Args:
             config: The complete mission configuration dictionary
-            hardware_list: List of available hardware on this drone
+            hardware_list: The list of available hardware on this drone
         """
         self.config = config
-        self.hardware_list = hardware_list  # NEW: Store hardware_list
-        print(f"[BehaviorFactory] Initialized with configuration and hardware: {self.hardware_list}")
+        self.hardware_list = hardware_list # NEW: Store hardware list
+        print(f"[BehaviorFactory] Initialized with hardware: {self.hardware_list}")
 
-    def _get_plugins(self, task: Task, hal: HAL) -> Dict[str, Any]:
+    # NEW: Pass hardware_list to this method
+    def _get_plugins(self, task: Task, hal: HAL, hardware_list: List[str]) -> Dict[str, Any]:
         """
         Instantiates the plugins required by a task using the factory functions.
         
@@ -273,6 +303,7 @@ class BehaviorFactory:
         Args:
             task: The Task definition from the mission JSON
             hal: The Hardware Abstraction Layer providing hardware interfaces
+            hardware_list: The list of available hardware strings
             
         Returns:
             A dictionary of instantiated plugins: {"detector": ..., "strategy": ..., "actuator": ...}
@@ -291,12 +322,12 @@ class BehaviorFactory:
                 )
                 # --- End of FIX ---
                 
-                # NEW: Pass hardware_list
+                # NEW: Pass hardware_list to factory function
                 detector = get_detector(
                     task.detector, 
                     camera, 
                     detector_config,
-                    hardware_list=self.hardware_list
+                    hardware_list
                 )
                 dependencies["detector"] = detector
                 print(f"[BehaviorFactory] ✓ Detector '{task.detector}' loaded successfully")
@@ -318,12 +349,12 @@ class BehaviorFactory:
                 )
                 # --- End of FIX ---
 
-                # NEW: Pass hardware_list
+                # NEW: Pass hardware_list to factory function
                 strategy = get_strategy(
                     task.strategy, 
                     vehicle_state, 
                     strategy_config,
-                    hardware_list=self.hardware_list
+                    hardware_list
                 )
                 dependencies["strategy"] = strategy
                 print(f"[BehaviorFactory] ✓ Strategy '{task.strategy}' loaded successfully")
@@ -345,12 +376,12 @@ class BehaviorFactory:
                 )
                 # --- End of FIX ---
                 
-                # NEW: Pass hardware_list
+                # NEW: Pass hardware_list to factory function
                 actuator = get_actuator(
                     task.actuator, 
                     actuator_hardware, 
                     actuator_config,
-                    hardware_list=self.hardware_list
+                    hardware_list
                 )
                 dependencies["actuator"] = actuator
                 print(f"[BehaviorFactory] ✓ Actuator '{task.actuator}' loaded successfully")
@@ -388,7 +419,7 @@ class BehaviorFactory:
         if plugin_category in self.config:
             if plugin_name in self.config[plugin_category]:
                 default_config = self.config[plugin_category][plugin_name]
-                print(f"[BehaviorFactory] Loaded default config from '{plugin_category}.{plugin_name}'")
+                # print(f"[BehaviorFactory] Loaded default config from '{plugin_category}.{plugin_name}'")
 
         # 2. Get mission-specific config from the .json 'params' block
         mission_specific_config = mission_params.get(plugin_name, {})
@@ -426,7 +457,8 @@ class BehaviorFactory:
         print(f"[BehaviorFactory] Creating behavior for action: {task.action}")
         
         # 1. Get the required plugins for this task
-        dependencies = self._get_plugins(task, hal)
+        # NEW: Pass the stored hardware_list
+        dependencies = self._get_plugins(task, hal, self.hardware_list)
         
         # 2. Validate that required plugins were loaded
         self._validate_dependencies(task, dependencies)
@@ -446,6 +478,11 @@ class BehaviorFactory:
         # ... add other behaviors here ...
         
         else:
+            # FIX: Add a default behavior for IGNORE
+            if action == "IGNORE":
+                # Return a dummy behavior that does nothing
+                return RTHBehavior(mission_state, hal, {}) # HACK: Should be a real NoOpBehavior
+            
             raise ValueError(f"Unknown behavior action: {task.action}")
     
     def _validate_dependencies(self, task: Task, dependencies: Dict[str, Any]):
@@ -471,5 +508,8 @@ class BehaviorFactory:
         if action in requirements:
             for required in requirements[action]:
                 if required not in dependencies or dependencies[required] is None:
+                    # This check is now superseded by the factory's hardware check,
+                    # but we leave it as a fallback.
                     print(f"[BehaviorFactory] ⚠ WARNING: Required plugin '{required}' not loaded for action '{action}'")
                     print(f"[BehaviorFactory]   The behavior may fail during execution.")
+

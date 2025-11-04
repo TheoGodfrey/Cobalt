@@ -1,4 +1,4 @@
-"""
+""""
 Main entry point for COBALT drone client.
 Usage: python main.py --id scout_1 --mission missions/mob_search_001.json
 
@@ -9,7 +9,7 @@ REFACTOR: Added hardware_list dependency injection.
 import asyncio
 import argparse
 from pathlib import Path
-from typing import List  # NEW: For hardware_list
+from typing import List # NEW: For hardware_list
 
 # Bug #4 fix: Use load_mission_file, not load_mission
 from core.g1_mission_definition.loader import load_mission_file
@@ -42,8 +42,9 @@ async def main():
                        help='Drone ID (e.g., scout_1, payload_1)')
     parser.add_argument('--mission', required=True, 
                        help='Path to mission JSON file')
+    # UPDATED: Default is now system_config.yaml, but we should always specify it
     parser.add_argument('--config', default='config/system_config.yaml',
-                       help='Path to configuration file (default: config/system_config.yaml)')
+                       help='Path to SYSTEM configuration file (default: config/system_config.yaml)')
     parser.add_argument('--log-dir', default='logs',
                        help='Directory for log files (default: logs)')
     parser.add_argument('--max-logs', type=int, default=0,
@@ -67,6 +68,7 @@ async def main():
     try:
         # 1. Load configuration and mission
         logger.log("Loading configuration...", "info")
+        # Load the one config file specified by the user
         config = load_config(args.config)
         
         logger.log("Loading mission file...", "info")
@@ -79,12 +81,7 @@ async def main():
         fleet_config = config.get('fleet', {})
         drone_config = fleet_config.get(args.id, {})
         
-        # Extract the hardware list. This assumes a config structure like:
-        # fleet:
-        #   scout_1:
-        #     role: "scout"
-        #     hal: "simulated"
-        #     hardware: ["gps", "camera_thermal", "dropper_mechanism"]
+        # Extract the hardware list.
         hardware_list = drone_config.get('hardware', [])
         if not hardware_list:
             logger.log(f"No 'hardware' list found for '{args.id}' in config. "
@@ -95,6 +92,7 @@ async def main():
         
         # 2. Create hardware layer
         logger.log(f"Initializing HAL for {args.id}...", "info")
+        # This function will now find the 'fleet' key because 'config' is loaded from the correct file
         flight_controller = get_flight_controller(config, args.id)
         vehicle_state = flight_controller.vehicle_state
         
@@ -141,9 +139,6 @@ async def main():
         
         # Now, link the safety_monitor back to the controller
         controller.safety_monitor = safety_monitor
-        
-        # The old line below is no longer needed, as it's done in the constructor
-        # safety_monitor.mission_state = controller.mission_state
         
         # --- End of FIX 1.2 ---
         
@@ -202,3 +197,4 @@ if __name__ == "__main__":
         print(f"\n[Main] Fatal error: {e}")
         import sys
         sys.exit(1)
+

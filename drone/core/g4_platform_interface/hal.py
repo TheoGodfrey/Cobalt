@@ -120,7 +120,7 @@ def get_flight_controller(config: Dict[str, Any], drone_id: str) -> BaseFlightCo
     if 'fleet' not in config:
         raise KeyError(
             "Configuration is missing 'fleet' key. "
-            "Please ensure your mission_config.yaml includes a fleet definition."
+            "Please ensure your fleet_config.yaml includes a fleet definition."
         )
     
     # Look up the drone's configuration
