@@ -93,7 +93,7 @@ def get_flight_controller(config: Dict[str, Any], drone_id: str) -> BaseFlightCo
     the appropriate configuration.
     
     Args:
-        config: The complete mission configuration dictionary (from mission_config.yaml)
+        config: The complete *MERGED* configuration dictionary
         drone_id: The unique identifier for this drone (e.g., "scout_1", "payload_1")
         
     Returns:
@@ -105,7 +105,7 @@ def get_flight_controller(config: Dict[str, Any], drone_id: str) -> BaseFlightCo
         KeyError: If required configuration keys are missing
         
     Example:
-        >>> config = load_config('config/mission_config.yaml')
+        >>> config = load_config('config/system_config.yaml')
         >>> hal = get_flight_controller(config, "scout_1")
         >>> await hal.connect()
     """
@@ -118,9 +118,10 @@ def get_flight_controller(config: Dict[str, Any], drone_id: str) -> BaseFlightCo
     
     # Validate that we have a fleet configuration
     if 'fleet' not in config:
+        # UPDATED: Clearer error message
         raise KeyError(
             "Configuration is missing 'fleet' key. "
-            "Please ensure your fleet_config.yaml includes a fleet definition."
+            "Ensure 'fleet_config.yaml' is present and 'drone/main.py' is merging it."
         )
     
     # Look up the drone's configuration
@@ -142,7 +143,6 @@ def get_flight_controller(config: Dict[str, Any], drone_id: str) -> BaseFlightCo
     hal_config = {
         'drone_id': drone_id,
         'role': drone_config.get('role', 'unknown'),
-        'plugins': drone_config.get('plugins', []),
     }
     
     # Add network configuration if available

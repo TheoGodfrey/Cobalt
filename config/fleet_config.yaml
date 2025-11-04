@@ -25,4 +25,5 @@ fleet:
     hardware:
       - "gps"                 # For lawnmower and goto_target
       - "dropper_mechanism"   # For payload_dropper
+      - "camera_thermal"      # NEW: Added to satisfy thermal_detector
 

@@ -1,15 +1,16 @@
-""""
+"""
 Main entry point for COBALT drone client.
 Usage: python main.py --id scout_1 --mission missions/mob_search_001.json
 
 FIX for Bug #10: MissionLogger now receives drone_id parameter
 
 REFACTOR: Added hardware_list dependency injection.
+REFACTOR: Now loads and merges system_config.yaml and fleet_config.yaml.
 """
 import asyncio
 import argparse
 from pathlib import Path
-from typing import List # NEW: For hardware_list
+from typing import List
 
 # Bug #4 fix: Use load_mission_file, not load_mission
 from core.g1_mission_definition.loader import load_mission_file
@@ -42,7 +43,7 @@ async def main():
                        help='Drone ID (e.g., scout_1, payload_1)')
     parser.add_argument('--mission', required=True, 
                        help='Path to mission JSON file')
-    # UPDATED: Default is now system_config.yaml, but we should always specify it
+    # UPDATED: Default is now system_config.yaml
     parser.add_argument('--config', default='config/system_config.yaml',
                        help='Path to SYSTEM configuration file (default: config/system_config.yaml)')
     parser.add_argument('--log-dir', default='logs',
@@ -62,15 +63,32 @@ async def main():
     )
     logger.log(f"Starting COBALT drone: {args.id}", "info")
     logger.log(f"Mission file: {args.mission}", "info")
-    logger.log(f"Config file: {args.config}", "info")
+    logger.log(f"System Config file: {args.config}", "info")
     # ====================================================================================
     
     try:
         # 1. Load configuration and mission
         logger.log("Loading configuration...", "info")
-        # Load the one config file specified by the user
-        config = load_config(args.config)
         
+        # --- NEW: Load and merge both config files ---
+        # Load the main system config (network, plugins, etc.)
+        system_config = load_config(args.config)
+        
+        # Find and load the fleet config (assuming it's in the same 'config' dir)
+        config_dir = Path(args.config).parent
+        fleet_config_path = config_dir / "fleet_config.yaml"
+        
+        if not fleet_config_path.exists():
+            logger.log(f"CRITICAL: fleet_config.yaml not found at {fleet_config_path}", "error")
+            raise FileNotFoundError(f"fleet_config.yaml not found at {fleet_config_path}")
+            
+        logger.log(f"Loading fleet config from {fleet_config_path}...", "info")
+        fleet_config_data = load_config(str(fleet_config_path)) # This will be a dict, e.g., {"fleet": {...}}
+
+        # Merge them. The fleet data is top-priority.
+        config = {**system_config, **fleet_config_data}
+        # --- END OF NEW LOADING LOGIC ---
+
         logger.log("Loading mission file...", "info")
         mission_data = load_mission_file(Path(args.mission))
         mission_flow = parse_mission_flow(mission_data)
@@ -92,7 +110,6 @@ async def main():
         
         # 2. Create hardware layer
         logger.log(f"Initializing HAL for {args.id}...", "info")
-        # This function will now find the 'fleet' key because 'config' is loaded from the correct file
         flight_controller = get_flight_controller(config, args.id)
         vehicle_state = flight_controller.vehicle_state
         
