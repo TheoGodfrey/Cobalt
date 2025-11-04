@@ -10,7 +10,7 @@ dependencies (plugins, HAL) via dependency injection.
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Protocol, Optional, Any, Dict
+from typing import Protocol, Optional, Any, Dict, List  # NEW: Added List
 
 # --- Import correct data structures instead of placeholders ---
 from .mission_state import MissionState, MissionStateEnum
@@ -46,6 +46,11 @@ class HAL(Protocol):
         ...
     
     async def get_position(self) -> Waypoint:
+        ...
+    
+    # NEW: Add vehicle_state property to HAL protocol
+    @property
+    def vehicle_state(self) -> Any: # Using Any to avoid new import
         ...
 
 # --- Base Behavior ---
@@ -223,6 +228,7 @@ class RTHBehavior(BaseBehavior):
         print("[RTHBehavior] Arrived at Hub. Now landing...")
         
         # --- FIX: Actually call the land function ---
+        # (This was already correct in the provided file)
         await self.hal.land()
         # --- End of Fix ---
         
@@ -234,6 +240,7 @@ class RTHBehavior(BaseBehavior):
 
 # ====================================================================================
 # FIX for Bug #6: Complete BehaviorFactory Implementation
+# REFACTOR: Added hardware_list
 # ====================================================================================
 
 class BehaviorFactory:
@@ -244,15 +251,17 @@ class BehaviorFactory:
     This factory uses the plugin factory functions (Bug #2 fix) to
     actually load and configure plugins instead of just printing mock messages.
     """
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], hardware_list: List[str]):  # NEW: Added hardware_list
         """
         Initializes the factory with configuration.
         
         Args:
             config: The complete mission configuration dictionary
+            hardware_list: List of available hardware on this drone
         """
         self.config = config
-        print("[BehaviorFactory] Initialized with configuration.")
+        self.hardware_list = hardware_list  # NEW: Store hardware_list
+        print(f"[BehaviorFactory] Initialized with configuration and hardware: {self.hardware_list}")
 
     def _get_plugins(self, task: Task, hal: HAL) -> Dict[str, Any]:
         """
@@ -282,7 +291,13 @@ class BehaviorFactory:
                 )
                 # --- End of FIX ---
                 
-                detector = get_detector(task.detector, camera, detector_config)
+                # NEW: Pass hardware_list
+                detector = get_detector(
+                    task.detector, 
+                    camera, 
+                    detector_config,
+                    hardware_list=self.hardware_list
+                )
                 dependencies["detector"] = detector
                 print(f"[BehaviorFactory] ✓ Detector '{task.detector}' loaded successfully")
                 
@@ -303,7 +318,13 @@ class BehaviorFactory:
                 )
                 # --- End of FIX ---
 
-                strategy = get_strategy(task.strategy, vehicle_state, strategy_config)
+                # NEW: Pass hardware_list
+                strategy = get_strategy(
+                    task.strategy, 
+                    vehicle_state, 
+                    strategy_config,
+                    hardware_list=self.hardware_list
+                )
                 dependencies["strategy"] = strategy
                 print(f"[BehaviorFactory] ✓ Strategy '{task.strategy}' loaded successfully")
                 
@@ -324,7 +345,13 @@ class BehaviorFactory:
                 )
                 # --- End of FIX ---
                 
-                actuator = get_actuator(task.actuator, actuator_hardware, actuator_config)
+                # NEW: Pass hardware_list
+                actuator = get_actuator(
+                    task.actuator, 
+                    actuator_hardware, 
+                    actuator_config,
+                    hardware_list=self.hardware_list
+                )
                 dependencies["actuator"] = actuator
                 print(f"[BehaviorFactory] ✓ Actuator '{task.actuator}' loaded successfully")
                 

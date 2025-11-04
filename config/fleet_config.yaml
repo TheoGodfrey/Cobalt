@@ -1,0 +1,24 @@
+fleet:
+  scout_1:
+    role: "scout"
+    hal: "simulated" # 'simulated', 'ardupilot', 'dji', 'omniverse'
+    hardware:
+      - "camera_rgb_v1"
+      - "camera_thermal_v1"
+      - "long_range_antenna"
+  
+  scout_2:
+    role: "scout"
+    hal: "simulated"
+    hardware:
+      - "camera_rgb_v1"
+      - "camera_thermal_v2_highres"
+      - "long_range_antenna"
+  
+  payload_1:
+    role: "payload"
+    hal: "simulated"
+    hardware:
+      - "camera_rgb_v1"
+      - "camera_thermal_v1"
+      - "payload_dropper_mechanism_v1"

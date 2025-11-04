@@ -16,7 +16,7 @@ from .satellite_relay import SatelliteRelay
 
 # --- Configuration ---
 # --- FIX 3.2: Load config from file ---
-CONFIG_FILE = os.environ.get("COBALT_CONFIG", "config/mission_config.yaml")
+CONFIG_FILE = os.environ.get("COBALT_CONFIG", "config/system_config.yaml")
 config = load_config(CONFIG_FILE)
 network_config = config.get("network", {})
 fleet_config = config.get("fleet", {})

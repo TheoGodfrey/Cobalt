@@ -1,29 +1,3 @@
-# Main Configuration for COBALT System
-# Loaded by both drone/main.py and hub/hub_main.py
-
-# Fleet topology
-# Defines all drones the hub knows about.
-# The drone/main.py --id flag must match one of these.
-fleet:
-  scout_1:
-    role: "scout"
-    hal: "simulated" # 'simulated', 'ardupilot', 'dji', 'omniverse'
-    plugins:
-      - "thermal_detector"
-      - "lawnmower"
-  scout_2:
-    role: "scout"
-    hal: "simulated"
-    plugins:
-      - "thermal_detector"
-      - "lawnmower"
-  payload_1:
-    role: "payload"
-    hal: "simulated"
-    plugins:
-      - "payload_dropper"
-      - "lawnmower" # For flying to the drop point
-
 # Network configuration
 network:
   mqtt_broker_host: "localhost" # Assumes mosquitto is running on the same machine

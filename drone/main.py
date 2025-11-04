@@ -3,10 +3,13 @@ Main entry point for COBALT drone client.
 Usage: python main.py --id scout_1 --mission missions/mob_search_001.json
 
 FIX for Bug #10: MissionLogger now receives drone_id parameter
+
+REFACTOR: Added hardware_list dependency injection.
 """
 import asyncio
 import argparse
 from pathlib import Path
+from typing import List  # NEW: For hardware_list
 
 # Bug #4 fix: Use load_mission_file, not load_mission
 from core.g1_mission_definition.loader import load_mission_file
@@ -39,8 +42,8 @@ async def main():
                        help='Drone ID (e.g., scout_1, payload_1)')
     parser.add_argument('--mission', required=True, 
                        help='Path to mission JSON file')
-    parser.add_argument('--config', default='config/mission_config.yaml',
-                       help='Path to configuration file (default: config/mission_config.yaml)')
+    parser.add_argument('--config', default='config/system_config.yaml',
+                       help='Path to configuration file (default: config/system_config.yaml)')
     parser.add_argument('--log-dir', default='logs',
                        help='Directory for log files (default: logs)')
     parser.add_argument('--max-logs', type=int, default=0,
@@ -70,6 +73,25 @@ async def main():
         mission_data = load_mission_file(Path(args.mission))
         mission_flow = parse_mission_flow(mission_data)
         logger.log(f"Mission '{mission_flow.mission_id}' loaded successfully", "info")
+        
+        # --- NEW: Hardware-Aware Refactor ---
+        # Look up this drone's specific config from the fleet
+        fleet_config = config.get('fleet', {})
+        drone_config = fleet_config.get(args.id, {})
+        
+        # Extract the hardware list. This assumes a config structure like:
+        # fleet:
+        #   scout_1:
+        #     role: "scout"
+        #     hal: "simulated"
+        #     hardware: ["gps", "camera_thermal", "dropper_mechanism"]
+        hardware_list = drone_config.get('hardware', [])
+        if not hardware_list:
+            logger.log(f"No 'hardware' list found for '{args.id}' in config. "
+                         f"Hardware validation may fail.", "warning")
+        else:
+            logger.log(f"Found hardware: {hardware_list}", "info")
+        # --- End of NEW ---
         
         # 2. Create hardware layer
         logger.log(f"Initializing HAL for {args.id}...", "info")
@@ -103,7 +125,8 @@ async def main():
             vehicle_state=vehicle_state,
             mqtt=mqtt,
             safety_monitor=None,  # Pass None for now
-            config=config
+            config=config,
+            hardware_list=hardware_list  # NEW: Pass hardware list
         )
         
         # 4. Create safety monitor SECOND
