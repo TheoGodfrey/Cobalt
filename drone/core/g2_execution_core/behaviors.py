@@ -88,6 +88,9 @@ class BaseBehavior(ABC):
         self.strategy: Optional[Strategy] = dependencies.get("strategy")
         self.actuator: Optional[Actuator] = dependencies.get("actuator")
 
+        self.MAX_CONSECUTIVE_FAILURES = 3 # Max retries
+        self._failure_count = 0
+
     async def start(self):
         """Starts the behavior's run loop as an async task."""
         if self._running:
@@ -110,6 +113,25 @@ class BaseBehavior(ABC):
                 pass
         self._task = None
         print(f"[{self.__class__.__name__}] Stopped.")
+
+    def _reset_failures(self):
+        """Resets the consecutive failure count."""
+        if self._failure_count > 0:
+            print(f"[{self.__class__.__name__}] Action successful, resetting failure count.")
+        self._failure_count = 0
+
+    def _increment_failure(self, failure_type: str = "navigation"):
+        """Increments failure count and triggers failure state if threshold is met."""
+        self._failure_count += 1
+        print(f"[{self.__class__.__name__}] WARNING: A {failure_type} failure occurred "
+              f"({self._failure_count}/{self.MAX_CONSECUTIVE_FAILURES}).")
+        
+        if self._failure_count >= self.MAX_CONSECUTIVE_FAILURES:
+            print(f"[{self.__class__.__name__}] CRITICAL: Failure threshold reached. "
+                  f"Transitioning to NAVIGATION_FAILURE.")
+            # This transition will be caught by the MissionController
+            self.mission_state.transition(MissionStateEnum.NAVIGATION_FAILURE)
+    # --- End of NEW
 
     @abstractmethod
     async def run(self):
