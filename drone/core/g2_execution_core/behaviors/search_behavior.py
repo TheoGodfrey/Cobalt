@@ -1,8 +1,14 @@
 import asyncio
-
+import time # <-- NEW
 from .base import BaseBehavior
 from ..mission_state import MissionStateEnum
 from ...g3_capability_plugins.detectors.base import Detection
+
+# --- NEW: Imports for Geolocation ---
+from ...utils.navigation import image_to_world_position, CameraIntrinsicsHelper
+from ...utils.config_models import CameraIntrinsics
+# --- End NEW ---
+
 
 class SearchBehavior(BaseBehavior):
     """
@@ -14,8 +20,34 @@ class SearchBehavior(BaseBehavior):
     """
 
     async def _handle_detection(self, detection: Detection):
-        """Helper to process and publish a detection."""
-        print(f"[SearchBehavior] *** Target Found! *** at {detection.position}")
+        """Helper to process, geolocate, and publish a detection."""
+        print(f"[SearchBehavior] *** Target Spotted! *** at pixel {detection.position}")
+        
+        # --- NEW: Geolocation Logic ---
+        # 1. Get current state for geolocation
+        telem = self.hal.vehicle_state.current
+        
+        # 2. Load camera intrinsics from the config
+        intrinsics_data = self.config.get("camera_intrinsics", {})
+        if not intrinsics_data:
+            print("[SearchBehavior] WARNING: 'camera_intrinsics' not in config. Cannot geolocate.")
+            return
+
+        try:
+            intrinsics = CameraIntrinsicsHelper(CameraIntrinsics(**intrinsics_data))
+        except TypeError as e:
+            print(f"[SearchBehavior] ERROR: Invalid camera_intrinsics config: {e}")
+            return
+
+        # 3. Perform Geolocation (Patent Claim 12)
+        world_pos = image_to_world_position(
+            pixel=detection.position,
+            drone_telemetry=telem,
+            intrinsics=intrinsics,
+            ground_level_z=0.0 # Assuming sea level
+        )
+        print(f"[SearchBehavior] Geolocation: {world_pos}")
+        # --- END NEW ---
         
         try:
             track_id = detection.track_id or f"trk_{int(detection.timestamp)}"
@@ -25,9 +57,10 @@ class SearchBehavior(BaseBehavior):
                 "detection": {
                     "class_label": detection.class_label,
                     "confidence": detection.confidence,
-                    "position": detection.position,
                     "timestamp": detection.timestamp,
-                    "track_id": track_id
+                    "track_id": track_id,
+                    "position_pixel": detection.position, # Keep pixel data
+                    "position_local": {"x": world_pos.x, "y": world_pos.y, "z": world_pos.z} # Add world data
                 }
             }
             
@@ -68,7 +101,30 @@ class SearchBehavior(BaseBehavior):
                         _target_found_event.set()
                         break
                     
-                    await asyncio.sleep(0.05) # Fast scan rate
+                    # --- NEW: Report "Misses" for Object Permanence ---
+                    else:
+                        # Report that we scanned and found nothing
+                        current_pos = self.hal.vehicle_state.position_local
+                        current_alt = -current_pos.z # Altitude is positive Z-up
+                        
+                        # r_i = f(h_i) from Patent Claim 4
+                        # Use a simple linear model: sensor radius = 0.5 * altitude
+                        sensor_radius_m = current_alt * 0.5 
+                        
+                        if self.mqtt.is_connected():
+                            await self.mqtt.publish(
+                                f"fleet/sensor_miss/{self.drone_id}",
+                                {
+                                    "drone_id": self.drone_id,
+                                    "timestamp": time.monotonic(),
+                                    "position_local": {"x": current_pos.x, "y": current_pos.y},
+                                    "altitude": current_alt,
+                                    "sensor_radius_m": sensor_radius_m
+                                }
+                            )
+                    # --- END NEW ---
+                    
+                    await asyncio.sleep(0.5) # Scan rate (was 0.05, slower is better for misses)
             except asyncio.CancelledError:
                 print("[SearchBehavior] Sensing loop cancelled.")
             except Exception as e:
@@ -87,6 +143,8 @@ class SearchBehavior(BaseBehavior):
                         await asyncio.sleep(1)
                         continue
                     
+                    # NOTE: This loop now receives new "goto_target" commands
+                    # from the Hub's optimiser, overriding the local strategy.
                     waypoint = await self.strategy.next_waypoint()
                     print(f"[SearchBehavior] Moving to waypoint: ({waypoint.x}, {waypoint.y}, {waypoint.z})")
 

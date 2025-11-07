@@ -147,21 +147,23 @@ class BehaviorFactory:
 
         action = task.action.upper()
         
+        # MODIFIED: Pass self.config to all behaviors
+        
         if action == "EXECUTE_SEARCH":
-            return SearchBehavior(mission_state, hal, dependencies, mqtt, drone_id)
+            return SearchBehavior(mission_state, hal, dependencies, mqtt, drone_id, self.config)
             
         elif action == "EXECUTE_DELIVERY":
-            return DeliveryBehavior(mission_state, hal, dependencies, mqtt, drone_id)
+            return DeliveryBehavior(mission_state, hal, dependencies, mqtt, drone_id, self.config)
             
         elif action == "EXECUTE_RTH":
-            return RTHBehavior(mission_state, hal, dependencies, mqtt, drone_id)
+            return RTHBehavior(mission_state, hal, dependencies, mqtt, drone_id, self.config)
         
         elif action == "EXECUTE_SACRIFICIAL_DELIVERY":
-            return SacrificialDeliveryBehavior(mission_state, hal, dependencies, mqtt, drone_id)
+            return SacrificialDeliveryBehavior(mission_state, hal, dependencies, mqtt, drone_id, self.config)
         
         elif action == "IGNORE":
             # Return a behavior that does nothing but transitions to LANDING
-            return RTHBehavior(mission_state, hal, {}, mqtt, drone_id) 
+            return RTHBehavior(mission_state, hal, {}, mqtt, drone_id, self.config)
             
         else:
             raise ValueError(f"Unknown behavior action: {task.action}")

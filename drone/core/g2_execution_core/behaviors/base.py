@@ -61,7 +61,8 @@ class BaseBehavior(ABC):
                  hal: HAL,
                  dependencies: Dict[str, Any],
                  mqtt: MqttClient,
-                 drone_id: str):
+                 drone_id: str,
+                 config: Dict[str, Any]): # <-- MODIFIED: Added config
         """
         Initialize the behavior with its required dependencies.
         
@@ -71,11 +72,13 @@ class BaseBehavior(ABC):
             dependencies: A dictionary of required plugins.
             mqtt: The MqttClient for communication.
             drone_id: The drone's unique ID.
+            config: The main system config dictionary.
         """
         self.mission_state = mission_state
         self.hal = hal
         self.mqtt = mqtt
         self.drone_id = drone_id
+        self.config = config  # <-- MODIFIED: Store config
         self._running = False
         self._task: Optional[asyncio.Task] = None
         
