@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 # FIX for Bug #10: Import asdict
 from dataclasses import dataclass, field, asdict
-from time import time
+import time 
 from typing import Dict, Any, Optional, Set, List
 
 # We need the communication layer
@@ -21,7 +21,7 @@ from drone.core.cross_cutting.communication import MqttClient
 # We need the mission definition files (G1) to load
 from drone.core.g1_mission_definition.loader import load_mission_file
 # FIX for Bug #9: Function is parse_mission_flow, not parse_mission
-from drone.core.g1_mission_definition.parser import parse_mission_flow
+from drone.core.g1_mission_definition.parser import parse_mission_flow, MissionParseError
 from drone.core.g1_mission_definition.mission_flow import MissionFlow
 
 # --- FIX 3.2: Added 'role' to DroneState ---
@@ -167,20 +167,28 @@ class FleetCoordinator:
             if not mission_path.is_file():
                 raise FileNotFoundError(f"Mission file not found at {mission_path}")
             # --- End of Security Fix ---
+            
+            # Get all unique, valid roles defined in the fleet config
+            valid_roles = list(set(
+                d.get('role') for d in self.fleet_config.values() if d.get('role')
+            ))
 
             from drone.core.g1_mission_definition.loader import load_mission_file
             from drone.core.g1_mission_definition.parser import parse_mission_flow
             
             # --- MODIFIED: Load from the secured path ---
             mission_dict = load_mission_file(mission_path) 
-            self.current_mission = parse_mission_flow(mission_dict)
+            self.current_mission = parse_mission_flow(mission_dict, valid_roles)
             
-        except (ValueError, FileNotFoundError, SecurityException) as e:
+        # --- THIS IS THE FIX ---
+        # Exceptions are now re-raised so the GCS server can catch them
+        except (ValueError, FileNotFoundError, SecurityException, MissionParseError) as e:
             print(f"[FleetCoordinator] FAILED to load mission: {e}")
-            return
+            raise # Re-raise the exception
         except Exception as e:
             print(f"[FleetCoordinator] FAILED to load mission (unexpected error): {e}")
-            return
+            raise # Re-raise the exception
+        # --- END OF FIX ---
 
         print(f"[FleetCoordinator] Mission '{self.current_mission.mission_id}' loaded.")
         print(f"[FleetCoordinator] Hub is now WAITING for drones to connect and report IDLE.")

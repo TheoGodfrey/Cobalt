@@ -166,59 +166,44 @@ def get_flight_controller(config: Dict[str, Any], drone_id: str) -> BaseFlightCo
         'drone_id': drone_id,
         'role': drone_config.get('role', 'unknown'),
         # --- NEW: Inject the configured hardware list for simulated HALs ---
-        'hardware': drone_config.get('hardware', [])
+        'hardware': drone_config.get('hardware', []),
+        
+        # --- NEW: Inject simulation config for sim HAL ---
+        'simulation': config.get('simulation', {}),
+        
+        # --- NEW: Inject ArduPilot-specific config ---
+        'connection_string': config.get('network', {}).get('ardupilot_connection', 'udp:192.168.2.1:14550'),
+        'camera_stream_url': config.get('network', {}).get('camera_stream_url', 'rtsp://192.168.2.1:554/stream'),
+        
+        # --- NEW: Inject DJI-specific config ---
+        'app_key': config.get('network', {}).get('dji_app_key', 'YOUR_DJI_APP_KEY'),
+        
+        # --- NEW: Inject Omniverse-specific config ---
+        'omniverse_connection': config.get('network', {}).get('omniverse_connection', 'localhost:2318')
     }
     
-    # Add network configuration if available
-    if 'network' in config:
-        hal_config['network'] = config['network']
-    
-    # Add simulation configuration if available (for simulated HAL)
+    # Add simulation config (already in hal_config, but good to be explicit)
     if 'simulation' in config:
-        hal_config['simulation'] = config['simulation']
+        hal_config.update(config['simulation'])
+
     
     # Instantiate the appropriate HAL based on type
     if hal_type == 'simulated':
         # SimulatedController uses simulation config for initial position, speed, etc.
-        sim_config = config.get('simulation', {})
-        controller_config = {
-            **hal_config,
-            'flight_speed_ms': sim_config.get('flight_speed_ms', 10.0),
-            'start_lat': sim_config.get('start_lat', 0.0),
-            'start_lon': sim_config.get('start_lon', 0.0),
-            'start_alt': sim_config.get('start_alt', 0.0),
-        }
-        return SimulatedController(controller_config)
+        return SimulatedController(hal_config)
     
+    # --- THIS IS THE FIX ---
     elif hal_type == 'ardupilot':
-        # ArduPilotController has a different signature
-        # It needs vehicle_state passed explicitly and expects connection_string in config
-        vehicle_state = VehicleState()
-        
-        ardupilot_config = {
-            **hal_config,
-            'connection_string': config.get('network', {}).get('ardupilot_connection', 'udp:192.168.2.1:14550'),
-            'camera_stream_url': config.get('network', {}).get('camera_stream_url', 'rtsp://192.168.2.1:554/stream'),
-        }
-        
-        # Note: ArduPilotController has a non-standard signature
-        # This is a known inconsistency in the codebase
-        controller = ArduPilotController(vehicle_state, ardupilot_config)
-        return controller
+        # ArduPilotController now has a standard (config) constructor
+        # We pass the merged hal_config dictionary
+        return ArduPilotController(hal_config)
+    # --- END OF FIX ---
     
     elif hal_type == 'dji':
-        dji_config = {
-            **hal_config,
-            'app_key': config.get('network', {}).get('dji_app_key', 'YOUR_DJI_APP_KEY'),
-        }
-        return DJIController(dji_config)
+        return DJIController(hal_config)
     
     elif hal_type == 'omniverse':
-        omniverse_config = {
-            **hal_config,
-            'connection_string': config.get('network', {}).get('omniverse_connection', 'localhost:2318'),
-        }
-        return OmniverseController(omniverse_config)
+        return OmniverseController(hal_config)
     
     else:
         raise ValueError(

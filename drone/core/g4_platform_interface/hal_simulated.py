@@ -4,6 +4,7 @@ HAL Implementation: SimulatedController
 
 import asyncio
 import time
+import math # <-- NEW
 from typing import Optional, Dict, Any, List
 
 # Import base class
@@ -11,6 +12,10 @@ from .hal import BaseFlightController
 
 # Import component 10 definitions
 from .vehicle_state import Telemetry, VehicleModeEnum, GPSStatusEnum
+
+# --- FIX: Import explicit position types ---
+from ..utils.position import LocalPosition, GlobalPosition
+# --- End of FIX ---
 
 # Import protocols (interfaces)
 from ..g3_capability_plugins.strategies.base import Waypoint
@@ -41,7 +46,15 @@ class SimulatedController(BaseFlightController):
         # FIX for Bug #8: self.config is now set by the base class
         # We can now safely access it.
         
-        self._current_pos = Waypoint(0, 0, 0)
+        # --- FIX: Store home location for GPS translation ---
+        self._home_lat = self.config.get("start_lat", 44.5646)
+        self._home_lon = self.config.get("start_lon", -123.2821)
+        self._home_alt = self.config.get("start_alt", 0.0)
+        # Cosine of latitude for longitude calculations
+        self._lat_cos = math.cos(math.radians(self._home_lat))
+        # --- End of FIX ---
+
+        self._current_pos = Waypoint(0, 0, 0) # This is the internal LOCAL position
         self._target_pos: Optional[Waypoint] = None
         self._flight_speed_ms = self.config.get("flight_speed_ms", 10.0)
         self._battery = 100.0
@@ -55,6 +68,7 @@ class SimulatedController(BaseFlightController):
         
     async def connect(self):
         print(f"[SimulatedHAL] Connecting to simulated drone (Speed: {self._flight_speed_ms} m/s)...")
+        print(f"[SimulatedHAL] Home (Origin): {self._home_lat}, {self._home_lon}")
         await asyncio.sleep(0.5)
         # Start the background task that updates telemetry
         self._telemetry_task = asyncio.create_task(self._update_telemetry())
@@ -82,6 +96,17 @@ class SimulatedController(BaseFlightController):
              
         return list(set(detected)) # Return unique list
 
+    # --- NEW: Coordinate Translation Helper ---
+    def _translate_local_to_global(self, local_pos: LocalPosition) -> GlobalPosition:
+        """Converts local X/Y/Z meters to global Lat/Lon/Alt."""
+        # X is East, Y is North
+        lat = self._home_lat + (local_pos.y / 111111.0)
+        lon = self._home_lon + (local_pos.x / (111111.0 * self._lat_cos))
+        alt = self._home_alt + (-local_pos.z) # Z is Down, Alt is Up
+        
+        return GlobalPosition(lat=lat, lon=lon, alt=alt)
+    # --- End of NEW ---
+
     async def _update_telemetry(self):
         """A background task to simulate the drone's state over time."""
         while True:
@@ -95,18 +120,36 @@ class SimulatedController(BaseFlightController):
                 is_armed = True
                 new_mode = VehicleModeEnum.GUIDED # Default active mode
             
-            # 1. Simulate flight
+            # --- THIS IS THE FIX ---
+            # 1. Simulate flight (Now with 3D vector math)
             if self._target_pos:
-                # Simplified 1D movement for now
+                # Calculate 3D vector to target
                 dx = self._target_pos.x - self._current_pos.x
+                dy = self._target_pos.y - self._current_pos.y
+                dz = self._target_pos.z - self._current_pos.z
                 
-                if abs(dx) < self._flight_speed_ms:
-                    self._current_pos = self._target_pos
+                # Calculate distance
+                distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+                
+                # Check for arrival
+                # We check if we're less than one "tick" away
+                if distance < self._flight_speed_ms:
+                    self._current_pos.x = self._target_pos.x
+                    self._current_pos.y = self._target_pos.y
+                    self._current_pos.z = self._target_pos.z
                     self._target_pos = None
                     print("[SimulatedHAL] Arrived at waypoint.")
                 else:
-                    move = self._flight_speed_ms if dx > 0 else -self._flight_speed_ms
-                    self._current_pos.x += move
+                    # Calculate normalized direction vector (unit vector)
+                    norm_x = dx / distance
+                    norm_y = dy / distance
+                    norm_z = dz / distance
+                    
+                    # Move one step (speed * direction)
+                    self._current_pos.x += norm_x * self._flight_speed_ms
+                    self._current_pos.y += norm_y * self._flight_speed_ms
+                    self._current_pos.z += norm_z * self._flight_speed_ms
+            # --- END OF FIX ---
             else:
                 if is_armed:
                     new_mode = VehicleModeEnum.ARMED # Loitering
@@ -120,42 +163,66 @@ class SimulatedController(BaseFlightController):
                 self._battery -= 1.0 / 20.0 
                 if self._battery < 0: self._battery = 0
             
-            # 3. Create and publish telemetry
+            # --- FIX: Populate both Global and Local positions ---
+            # 3. Create new position objects
+            local_pos = LocalPosition(
+                x=self._current_pos.x, 
+                y=self._current_pos.y, 
+                z=self._current_pos.z
+            )
+            global_pos = self._translate_local_to_global(local_pos)
+
+            # 4. Create and publish telemetry
             new_telem = Telemetry(
-                position=self._current_pos,
+                position_local=local_pos,     # <-- NEW
+                position_global=global_pos,   # <-- NEW
                 mode=new_mode,
                 gps_status=GPSStatusEnum.RTK_FIXED,
                 battery_percent=self._battery,
-                is_armed=is_armed
+                is_armed=is_armed,
+                attitude_yaw=self._current_pos.yaw # Pass along yaw
             )
             self.vehicle_state.update(new_telem)
+            # --- End of FIX ---
 
     async def arm(self):
         print("[SimulatedHAL] Arming motors...")
         await asyncio.sleep(1)
+        
+        # --- FIX: Update Telemetry object construction ---
+        local_pos = LocalPosition(self._current_pos.x, self._current_pos.y, self._current_pos.z)
+        global_pos = self._translate_local_to_global(local_pos)
         self.vehicle_state.update(
             Telemetry(
-                position=self._current_pos,
+                position_local=local_pos,
+                position_global=global_pos,
                 mode=VehicleModeEnum.ARMED,
                 gps_status=GPSStatusEnum.RTK_FIXED,
                 battery_percent=self._battery,
                 is_armed=True
             )
         )
+        # --- End of FIX ---
         print("[SimulatedHAL] Armed.")
 
     async def disarm(self):
         print("[SimulatedHAL] Disarming motors...")
         await asyncio.sleep(1)
+
+        # --- FIX: Update Telemetry object construction ---
+        local_pos = LocalPosition(self._current_pos.x, self._current_pos.y, self._current_pos.z)
+        global_pos = self._translate_local_to_global(local_pos)
         self.vehicle_state.update(
             Telemetry(
-                position=self._current_pos,
+                position_local=local_pos,
+                position_global=global_pos,
                 mode=VehicleModeEnum.DISARMED,
                 gps_status=GPSStatusEnum.RTK_FIXED,
                 battery_percent=self._battery,
                 is_armed=False
             )
         )
+        # --- End of FIX ---
         print("[SimulatedHAL] Disarmed.")
 
     async def goto(self, waypoint: Waypoint) -> bool:

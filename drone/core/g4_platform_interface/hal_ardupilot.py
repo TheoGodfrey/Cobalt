@@ -23,6 +23,9 @@ from pymavlink import mavutil
 
 # --- FIX: Import the correct classes from vehicle_state.py ---
 from .vehicle_state import VehicleState, Telemetry, VehicleModeEnum, GPSStatusEnum
+# --- FIX: Import explicit position types ---
+from ..utils.position import LocalPosition, GlobalPosition
+
 # --- Re-use Waypoint from G3 as intended ---
 from ..g3_capability_plugins.strategies.base import Waypoint
 
@@ -35,7 +38,22 @@ DEFAULT_CONNECTION_STRING = 'udp:192.168.2.1:14550'
 CONNECTION_TIMEOUT = 30  # seconds
 ARM_TIMEOUT = 10 # seconds
 TAKEOFF_TIMEOUT = 30 # seconds
+GOTO_TIMEOUT = 60 # seconds per waypoint
 ALTITUDE_REACHED_THRESHOLD = 0.95 # 95% of target altitude
+ARRIVAL_DISTANCE_THRESHOLD = 1.0 # 1 meter
+
+# --- NEW: Helper function for GOTO logic ---
+def get_distance_metres(aLocation1: LocationGlobalRelative, aLocation2: LocationGlobalRelative) -> float:
+    """
+    Returns the ground distance in metres between two LocationGlobal objects.
+    This is a standard DroneKit helper function.
+    """
+    if aLocation1 is None or aLocation2 is None:
+        return 0.0
+        
+    dlat = aLocation2.lat - aLocation1.lat
+    dlong = aLocation2.lon - aLocation1.lon
+    return math.sqrt((dlat*dlat) + (dlong*dlong)) * 1.113195e5
 
 class ArduPilotCamera(BaseCamera):
     """
@@ -125,25 +143,24 @@ class ArduPilotController(BaseFlightController):
     HAL implementation for ArduPilot using DroneKit.
     """
 
-    def __init__(self, vehicle_state: VehicleState, config: dict):
+    # --- THIS IS THE FIX ---
+    def __init__(self, config: dict):
         """
         Initializes the ArduPilot controller.
 
         Args:
-            vehicle_state: The shared VehicleState object to update.
             config: A dictionary, typically from mission_config.yaml, containing
                     a 'connection_string' and 'camera_stream_url'.
         """
-        # Note: This file's __init__ does not call super().__init__(config),
-        # but it *does* match the base class signature (which Bug #7 fixed).
-        # We manually assign vehicle_state and config.
-        self.vehicle_state = vehicle_state
-        self.config = config
+        # Call super() to initialize self.config and self.vehicle_state
+        super().__init__(config)
         
-        self.connection_string = config.get('connection_string', DEFAULT_CONNECTION_STRING)
+        # self.config is now guaranteed to exist from the base class
+        self.connection_string = self.config.get('connection_string', DEFAULT_CONNECTION_STRING)
         
         # Assumes the video stream URL is separate from MAVLink
-        self.camera_stream_url = config.get('camera_stream_url', 'rtsp://192.168.2.1:554/stream')
+        self.camera_stream_url = self.config.get('camera_stream_url', 'rtsp://192.168.2.1:554/stream')
+    # --- END OF FIX ---
         
         self.vehicle: Optional[connect] = None
         self._camera = ArduPilotCamera(self.camera_stream_url)
@@ -153,6 +170,11 @@ class ArduPilotController(BaseFlightController):
         # Internal state to prevent spamming listeners
         self._last_mode = None
         self._last_armed = None
+        
+        # --- NEW: Home location for local coordinate translation ---
+        self._home_location: Optional[LocationGlobalRelative] = None
+        self._home_lat_cos: float = 1.0 # Cosine of home latitude
+        # --- End of NEW ---
         
         log.info(f"[HAL-ArduPilot] Initialized. Connecting to: {self.connection_string}")
 
@@ -279,7 +301,7 @@ class ArduPilotController(BaseFlightController):
                 if time.time() - start_time > ARM_TIMEOUT:
                     log.error("[HAL-ArduPilot] Failed to set GUIDED mode.")
                     return False
-                time.sleep(0.1)
+                await asyncio.sleep(0.1) # Use asyncio sleep
 
             # Arm the vehicle
             self.vehicle.armed = True
@@ -288,7 +310,7 @@ class ArduPilotController(BaseFlightController):
                 if time.time() - start_time > ARM_TIMEOUT:
                     log.error("[HAL-ArduPilot] Failed to arm vehicle.")
                     return False
-                time.sleep(0.1)
+                await asyncio.sleep(0.1) # Use asyncio sleep
                 
             log.info("[HAL-ArduPilot] Vehicle ARMED in GUIDED mode.")
             return True
@@ -307,7 +329,7 @@ class ArduPilotController(BaseFlightController):
         try:
             self.vehicle.armed = False
             while self.vehicle.armed:
-                time.sleep(0.1)
+                await asyncio.sleep(0.1) # Use asyncio sleep
             log.info("[HAL-ArduPilot] Vehicle DISARMED.")
             return True
         except Exception as e:
@@ -337,27 +359,70 @@ class ArduPilotController(BaseFlightController):
                 if alt >= altitude_m * ALTITUDE_REACHED_THRESHOLD:
                     log.info(f"[HAL-ArduPilot] Takeoff complete. Reached {alt:.1f}m.")
                     return True
-                time.sleep(0.5)
+                await asyncio.sleep(0.5) # Use asyncio sleep
                 
         except Exception as e:
             log.error(f"[HAL-ArduPilot] Error during takeoff: {e}")
             return False
 
-    async def goto_location(self, lat: float, lon: float, alt_m: float, groundspeed: float = 5.0):
+    # --- THIS IS THE FIX ---
+    async def goto(self, waypoint: Waypoint, groundspeed: float = 5.0) -> bool:
         """
-        Commands the vehicle to fly to a new location.
+        Commands the vehicle to fly to a new local waypoint.
+        Converts local waypoint to global coordinates before sending.
+        Blocks until arrival or failure.
         """
         if not self.vehicle or not self.vehicle.armed:
             log.warning(f"[HAL-ArduPilot] Cannot goto: Vehicle not armed.")
-            return
+            return False
             
         if self.vehicle.mode.name != "GUIDED":
             log.warning(f"[HAL-ArduPilot] Cannot goto: Vehicle not in GUIDED mode.")
-            return
+            return False
             
-        target_location = LocationGlobalRelative(lat, lon, alt_m)
-        self.vehicle.simple_goto(target_location, groundspeed=groundspeed)
-        log.debug(f"[HAL-ArduPilot] Commanded goto: {lat}, {lon} @ {alt_m}m")
+        if not self._home_location:
+            log.error("[HAL-ArduPilot] Cannot goto: Home location not set. Unable to translate local waypoint.")
+            return False
+
+        try:
+            # 1. Translate local Waypoint to global coordinates
+            global_target = self._translate_local_to_global(waypoint)
+            
+            # 2. Create DroneKit location object
+            # Note: ArduPilot alt is relative to home, which matches our Z logic
+            target_location = LocationGlobalRelative(global_target.lat, global_target.lon, global_target.alt)
+            
+            log.info(f"[HAL-ArduPilot] GOTO Local: ({waypoint.x:.1f}, {waypoint.y:.1f}, {waypoint.z:.1f})m")
+            log.info(f"[HAL-ArduPilot] GOTO Global: ({global_target.lat:.6f}, {global_target.lon:.6f}, {global_target.alt:.1f})m")
+
+            # 3. Send command
+            self.vehicle.simple_goto(target_location, groundspeed=groundspeed)
+            
+            # 4. Block until arrival
+            start_time = time.time()
+            
+            while self.vehicle.mode.name == "GUIDED":
+                if time.time() - start_time > GOTO_TIMEOUT:
+                    log.error("[HAL-ArduPilot] GOTO command timed out.")
+                    await self.stop_movement() # Loiter
+                    return False
+                    
+                current_loc = self.vehicle.location.global_relative_frame
+                remaining_distance = get_distance_metres(current_loc, target_location)
+                
+                if remaining_distance < ARRIVAL_DISTANCE_THRESHOLD:
+                    log.info("[HAL-ArduPilot] GOTO: Arrived at waypoint.")
+                    return True
+                    
+                await asyncio.sleep(0.5)
+            
+            log.warning("[HAL-ArduPilot] GOTO failed: Vehicle exited GUIDED mode.")
+            return False
+
+        except Exception as e:
+            log.error(f"[HAL-ArduPilot] Failed to execute goto: {e}")
+            return False
+    # --- END OF FIX ---
 
     async def set_roi(self, lat: float, lon: float, alt_m: float):
         """
@@ -421,6 +486,44 @@ class ArduPilotController(BaseFlightController):
     # --- FIX: Refactored all callbacks to use the Telemetry object
     # and the vehicle_state.update() method.
     
+    # --- NEW: Coordinate Translation Helpers ---
+    def _translate_global_to_local(self, global_pos: GlobalPosition) -> LocalPosition:
+        """Converts global Lat/Lon/Alt to local X/Y/Z meters from home."""
+        if not self._home_location:
+            # No home set, cannot translate
+            return LocalPosition(0, 0, 0)
+            
+        # Calculate X (East) and Y (North)
+        # X = delta_lon, Y = delta_lat
+        y = (global_pos.lat - self._home_location.lat) * 111111.0
+        x = (global_pos.lon - self._home_location.lon) * 111111.0 * self._home_lat_cos
+        
+        # Z is altitude difference (Down is positive)
+        # ArduPilot alt is relative to home, so this is correct.
+        z = -(global_pos.alt - self._home_location.alt)
+        
+        return LocalPosition(x=x, y=y, z=z)
+
+    def _translate_local_to_global(self, local_pos: Waypoint) -> GlobalPosition:
+        """Converts local X/Y/Z meters Waypoint to global Lat/Lon/Alt."""
+        if not self._home_location:
+            raise ValueError("Home location is not set. Cannot translate to global coordinates.")
+            
+        # X is East, Y is North
+        lat = self._home_location.lat + (local_pos.y / 111111.0)
+        lon = self._home_location.lon + (local_pos.x / (111111.0 * self._home_lat_cos))
+        
+        # Z is Down (NED), Alt is Up
+        # We assume relative altitude from home
+        alt = self._home_location.alt + (-local_pos.z)
+        
+        # Ensure altitude is not below 0 (e.g. if home alt is 0)
+        if alt < 0:
+            alt = 0.0
+            
+        return GlobalPosition(lat=lat, lon=lon, alt=alt)
+    # --- End of NEW ---
+    
     def _update_full_telemetry(self):
         """Helper function to get all data and push a new Telemetry update."""
         if not self.vehicle:
@@ -430,17 +533,29 @@ class ArduPilotController(BaseFlightController):
         telem = self.vehicle_state.current
 
         # --- Get Location ---
-        pos = Waypoint(telem.position.x, telem.position.y, telem.position.z)
         loc = self.vehicle.location.global_relative_frame # <-- Get the object
         
         # --- FIX: Check object and its attributes before use (Race Condition) ---
-        if loc and loc.lat is not None and loc.lon is not None and loc.alt is not None:
-            # Note: G3 Strategies use X,Y,Z. This HAL provides Lat/Lon/Alt.
-            # This is a different inconsistency, but for now we'll update
-            # the Waypoint with Lat/Lon/Alt.
-            pos = Waypoint(x=loc.lat, y=loc.lon, z=loc.alt, yaw=telem.position.yaw)
+        if not (loc and loc.lat is not None and loc.lon is not None and loc.alt is not None):
+            # We don't have a valid location, skip update
+            return
+        # --- End of FIX ---
+
+        # --- NEW: Set home location on first valid fix ---
+        if not self._home_location and loc.lat != 0 and loc.lon != 0:
+            log.info(f"[HAL-ArduPilot] Setting Home (Origin) to: {loc.lat}, {loc.lon}")
+            self._home_location = loc
+            self._home_lat_cos = math.cos(math.radians(loc.lat))
+        # --- End of NEW ---
+
+        # --- FIX: Populate explicit GlobalPosition object ---
+        global_pos = GlobalPosition(lat=loc.lat, lon=loc.lon, alt=loc.alt)
         # --- End of FIX ---
         
+        # --- FIX: Populate explicit LocalPosition object ---
+        local_pos = self._translate_global_to_local(global_pos)
+        # --- End of FIX ---
+
         # --- FIX 1.1: Get full attitude ---
         # Get defaults from current state
         att_roll = telem.attitude_roll
@@ -453,7 +568,6 @@ class ArduPilotController(BaseFlightController):
             att_roll = math.degrees(self.vehicle.attitude.roll)
             att_pitch = math.degrees(self.vehicle.attitude.pitch)
             att_yaw = math.degrees(self.vehicle.attitude.yaw)
-            pos.yaw = att_yaw # Also update yaw in Waypoint for consistency
         # --- End of FIX 1.1 ---
 
         # --- Get Battery ---
@@ -503,7 +617,8 @@ class ArduPilotController(BaseFlightController):
         # --- Create and push new Telemetry object ---
         new_telemetry = Telemetry(
             timestamp=time.monotonic(),
-            position=pos,
+            position_global=global_pos, # <-- NEW
+            position_local=local_pos,   # <-- NEW
             mode=mode,
             gps_status=gps,
             battery_percent=batt,

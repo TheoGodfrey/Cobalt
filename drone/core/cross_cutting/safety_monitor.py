@@ -8,7 +8,7 @@ from typing import List, Optional, Dict, Any
 
 # FIX: Import the state classes needed for type hinting and access
 from ..g2_execution_core.mission_state import MissionState, MissionStateEnum
-from ..g4_platform_interface.vehicle_state import VehicleState
+from ..g4_platform_interface.vehicle_state import VehicleState, VehicleModeEnum # <-- Import VehicleModeEnum
 from ..g4_platform_interface.hal import BaseFlightController
 from ..g3_capability_plugins.detectors.obstacle_detector import ObstacleDetector
 
@@ -90,10 +90,12 @@ class SafetyMonitor:
                     if violation:
                         await self.handle_violation(violation)
                 
+                # --- THIS IS THE FIX ---
                 # Check vehicle state for manual override
-                if self.vehicle_state.mode == "MANUAL":
+                if self.vehicle_state.mode == VehicleModeEnum.MANUAL:
                     # This is an example of a direct check
-                    if self.mission_state.current != "PAUSED":
+                    if self.mission_state.current != MissionStateEnum.PAUSED:
+                # --- END OF FIX ---
                         print("[SafetyMonitor] Manual override detected! Pausing mission.")
                         self.mission_state.pause()
 

@@ -6,7 +6,7 @@ to connect to.
 
 import asyncio
 import json
-from time import time
+import time # <-- THIS IS THE FIX
 import websockets
 from typing import Set, Optional
 from .fleet_coordinator import FleetCoordinator
@@ -45,13 +45,22 @@ class GcsServer:
 
             if command_action == "START_MISSION": # <-- FIX
                 mission_file = message.get("mission_id") # <-- FIX
-                if mission_file:
-                    # Run as a task so we don't block the server
-                    asyncio.create_task(
-                        self.fleet_coord.load_and_start_mission(mission_file)
-                    )
-                else:
+                if not mission_file:
                     await websocket.send(json.dumps({"type": "ERROR", "message": "No mission_file provided"}))
+                    return
+
+                # --- THIS IS THE FIX ---
+                # Await the call and wrap in try/except to catch load failures
+                try:
+                    await self.fleet_coord.load_and_start_mission(mission_file)
+                    # If successful, send a confirmation (optional)
+                    await websocket.send(json.dumps({"type": "INFO", "message": f"Mission '{mission_file}' loaded successfully."}))
+                except Exception as e:
+                    # Send the error message back to the GCS
+                    error_message = f"Failed to load mission: {e}"
+                    print(f"[GcsServer] {error_message}")
+                    await websocket.send(json.dumps({"type": "ERROR", "message": error_message}))
+                # --- END OF FIX ---
                     
             elif command_action == "PING":
                 await websocket.send(json.dumps({"type": "PONG", "timestamp": time.monotonic()}))
@@ -64,6 +73,7 @@ class GcsServer:
             await websocket.send(json.dumps({"type": "ERROR", "message": "Invalid JSON"}))
         except Exception as e:
             print(f"[GcsServer] Error handling message: {e}")
+            await websocket.send(json.dumps({"type": "ERROR", "message": f"An unexpected server error occurred: {e}"}))
 
     # --- FIX 1.5: GcsServer NameError ---
     # The 'finally' block now correctly calls 'self._unregister'

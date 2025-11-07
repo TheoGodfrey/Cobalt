@@ -172,87 +172,161 @@ class SearchBehavior(BaseBehavior):
     Executes a search task.
     Coordinates between a Strategy (to get waypoints) and a
     Detector (to find the target).
+    
+    --- REFACTORED to run sensing and flight loops concurrently. ---
     """
+
+    async def _handle_detection(self, detection: Detection):
+        """Helper to process and publish a detection."""
+        print(f"[SearchBehavior] *** Target Found! *** at {detection.position}")
+        
+        # --- NEW: Publish detection to Hub ---
+        try:
+            # Create a simple track_id if one isn't provided
+            track_id = detection.track_id or f"trk_{int(detection.timestamp)}"
+            
+            payload = {
+                "drone_id": self.drone_id,
+                "detection": {
+                    "class_label": detection.class_label,
+                    "confidence": detection.confidence,
+                    "position": detection.position, # (pixel_x, pixel_y)
+                    "timestamp": detection.timestamp,
+                    "track_id": track_id
+                }
+            }
+            
+            if self.mqtt.is_connected():
+                await self.mqtt.publish(
+                    f"fleet/detections/{self.drone_id}", 
+                    payload
+                )
+            print(f"[SearchBehavior] Published detection {track_id} to hub.")
+        except Exception as e:
+            print(f"[SearchBehavior] WARNING: Failed to publish detection: {e}")
+        # --- End of NEW ---
+
     async def run(self):
-        print(f"[SearchBehavior] Running...")
+        """
+        Runs the flight and sensing loops concurrently.
+        """
+        print(f"[SearchBehavior] Running (Concurrent Mode)...")
         if not self.strategy or not self.detector:
             print("[SearchBehavior] Error: Missing Strategy or Detector.")
             self.mission_state.transition(MissionStateEnum.ABORTED)
             return
 
-        try:
-            while self._running:
-                # 1. Check for pause state
-                if self.mission_state.current == MissionStateEnum.PAUSED:
-                    await asyncio.sleep(1)
-                    continue
-                
-                # 2. Get next waypoint from the injected Strategy
-                waypoint = await self.strategy.next_waypoint()
-                print(f"[SearchBehavior] Moving to waypoint: ({waypoint.x}, {waypoint.y}, {waypoint.z})")
-                
-                # 3. Command the HAL to move to the waypoint
-                arrival_success = await self.hal.goto(waypoint)
-                if not arrival_success:
-                    print(f"[SearchBehavior] Failed to reach waypoint.")
-                    # Implement retry logic or abort
-                    self._increment_failure("navigation") 
-                    continue
-                
-                self._reset_failures("navigation") # <-- SPECIFY "navigation"
+        _target_found_event = asyncio.Event()
 
-                # 4. At waypoint, use the injected Detector to look for target
-                print(f"[SearchBehavior] At waypoint, scanning for target...")
-                detection = await self.detector.detect()
-                
-                # --- THIS IS THE FIX ---
-                if detection: # This safely handles None
-                # --- END OF FIX ---
-                    print(f"[SearchBehavior] *** Target Found! *** at {detection.position}")
+        async def _sensing_loop():
+            """Continuously scans for targets."""
+            print("[SearchBehavior] Sensing loop started...")
+            try:
+                while self._running and not _target_found_event.is_set():
+                    # 1. Check for pause state
+                    if self.mission_state.current == MissionStateEnum.PAUSED:
+                        await asyncio.sleep(1)
+                        continue
                     
-                    # --- NEW: Publish detection to Hub ---
-                    try:
-                        # Create a simple track_id if one isn't provided
-                        track_id = detection.track_id or f"trk_{int(detection.timestamp)}"
-                        
-                        payload = {
-                            "drone_id": self.drone_id,
-                            "detection": {
-                                "class_label": detection.class_label,
-                                "confidence": detection.confidence,
-                                "position": detection.position, # (pixel_x, pixel_y)
-                                "timestamp": detection.timestamp,
-                                "track_id": track_id
-                            }
-                        }
-                        
-                        if self.mqtt.is_connected():
-                            await self.mqtt.publish(
-                                f"fleet/detections/{self.drone_id}", 
-                                payload
-                            )
-                        print(f"[SearchBehavior] Published detection {track_id} to hub.")
-                    except Exception as e:
-                        print(f"[SearchBehavior] WARNING: Failed to publish detection: {e}")
-                    # --- End of NEW ---
+                    # 2. Run detector
+                    detection = await self.detector.detect()
                     
-                    # Transition mission state to CONFIRMING or DELIVERING
-                    # This trigger will be caught by the MissionController
+                    # 3. Handle detection
+                    if detection and not _target_found_event.is_set():
+                        await self._handle_detection(detection)
+                        _target_found_event.set() # Signal flight loop to stop
+                        break
+                    
+                    # 4. Yield control
+                    await asyncio.sleep(0.05) # Fast scan rate
+            except asyncio.CancelledError:
+                print("[SearchBehavior] Sensing loop cancelled.")
+            except Exception as e:
+                print(f"[SearchBehavior] CRITICAL ERROR in sensing loop: {e}")
+                self._increment_failure("detector_failure")
+                _target_found_event.set() # Stop the behavior
+            finally:
+                print("[SearchBehavior] Sensing loop finished.")
+
+        async def _flight_loop():
+            """Continuously flies the search pattern."""
+            print("[SearchBehavior] Flight loop started...")
+            try:
+                while self._running and not _target_found_event.is_set():
+                    # 1. Check for pause state
+                    if self.mission_state.current == MissionStateEnum.PAUSED:
+                        await asyncio.sleep(1)
+                        continue
+                    
+                    # 2. Get next waypoint
+                    waypoint = await self.strategy.next_waypoint()
+                    print(f"[SearchBehavior] Moving to waypoint: ({waypoint.x}, {waypoint.y}, {waypoint.z})")
+
+                    # 3. Start flying, but also watch for the target_found event
+                    goto_task = asyncio.create_task(self.hal.goto(waypoint))
+                    event_wait_task = asyncio.create_task(_target_found_event.wait())
+                    
+                    done, pending = await asyncio.wait(
+                        {goto_task, event_wait_task}, 
+                        return_when=asyncio.FIRST_COMPLETED
+                    )
+
+                    if event_wait_task in done:
+                        # Target found by sensing loop *during* flight
+                        print("[SearchBehavior] Target found during flight. Cancelling goto.")
+                        goto_task.cancel()
+                        break # Exit flight loop
+
+                    # If here, goto_task finished. Get its result.
+                    arrival_success = await goto_task
+                    
+                    if not arrival_success:
+                        print(f"[SearchBehavior] Failed to reach waypoint.")
+                        self._increment_failure("navigation")
+                        continue # Try next waypoint
+                    
+                    self._reset_failures("navigation")
+            except asyncio.CancelledError:
+                print("[SearchBehavior] Flight loop cancelled.")
+            except Exception as e:
+                print(f"[SearchBehavior] CRITICAL ERROR in flight loop: {e}")
+                self._increment_failure("navigation")
+                _target_found_event.set() # Stop the behavior
+            finally:
+                print("[SearchBehavior] Flight loop finished.")
+
+        # --- Main execution of the concurrent loops ---
+        try:
+            sensing_task = asyncio.create_task(_sensing_loop())
+            flight_task = asyncio.create_task(_flight_loop())
+            
+            # Wait for either task to complete (which signals the other)
+            done, pending = await asyncio.wait(
+                {sensing_task, flight_task}, 
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            
+            # Cancel the other pending task
+            for task in pending:
+                task.cancel()
+
+            # Ensure both tasks are fully awaited to clear exceptions
+            await asyncio.gather(sensing_task, flight_task, return_exceptions=True)
+            
+            # If the target was found, transition state (unless we failed)
+            if _target_found_event.is_set():
+                if self.mission_state.current not in (MissionStateEnum.ABORTED, MissionStateEnum.NAVIGATION_FAILURE):
                     self.mission_state.transition(MissionStateEnum.CONFIRMING)
-                    break # Exit the search loop
-                
-                # 5. Check for stop signal
-                if not self._running:
-                    break
-                
-                await asyncio.sleep(0.1) # Yield control
+            
+            print("[SearchBehavior] Concurrent run finished.")
+
         except asyncio.CancelledError:
             print("[SearchBehavior] Canceled.")
         except Exception as e:
-            print(f"[SearchBehavior] CRITICAL ERROR in run loop: {e}")
+            print(f"[SearchBehavior] CRITICAL ERROR in run setup: {e}")
             self.mission_state.transition(MissionStateEnum.ABORTED)
         finally:
-            print("[SearchBehavior] Exiting run loop.")
+            print("[SearchBehavior] Exiting run method.")
 
 class DeliveryBehavior(BaseBehavior):
     """

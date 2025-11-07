@@ -4,7 +4,11 @@ Navigation, Geolocation, and Coordinate Transformation Utilities.
 import numpy as np
 import math
 from typing import Tuple
-from .position import Position
+
+# --- FIX: Import LocalPosition ---
+from .position import LocalPosition
+# --- End of FIX ---
+
 from ..g4_platform_interface.vehicle_state import Telemetry
 from .config_models import CameraIntrinsics # <-- FIX: Was CameraIntrinsicsConfig
 
@@ -71,7 +75,7 @@ def _get_rotation_matrix(attitude: Attitude) -> np.ndarray:
 def image_to_world_position(pixel: Tuple[int, int],
                             drone_telemetry: Telemetry,
                             intrinsics: CameraIntrinsicsHelper, # <-- FIX
-                            ground_level_z: float = 0.0) -> Position:
+                            ground_level_z: float = 0.0) -> LocalPosition: # <-- FIX: Return type
     """
     Performs geolocation (ray-casting) to find the 3D world position
     of a pixel, assuming a flat ground plane.
@@ -83,7 +87,7 @@ def image_to_world_position(pixel: Tuple[int, int],
         ground_level_z: The Z-coordinate of the ground (e.g., 0.0 for sea level).
         
     Returns:
-        A Position object with the estimated (x, y, z) world coordinates.
+        A LocalPosition object with the estimated (x, y, z) world coordinates.
     """
     
     # 1. Pixel to Normalized Camera Coordinates
@@ -113,12 +117,15 @@ def image_to_world_position(pixel: Tuple[int, int],
     v_world = R_body_to_world @ v_cam
     
     # 5. Ray-Plane Intersection
-    # Ray origin (drone's current position)
+    
+    # --- FIX: Read from explicit position_local ---
+    # Ray origin (drone's current local position)
     P0 = np.array([
-        drone_telemetry.position.x,
-        drone_telemetry.position.y,
-        drone_telemetry.position.z
+        drone_telemetry.position_local.x,
+        drone_telemetry.position_local.y,
+        drone_telemetry.position_local.z
     ])
+    # --- End of FIX ---
     
     # Ray direction (the rotated vector)
     V = v_world
@@ -131,16 +138,16 @@ def image_to_world_position(pixel: Tuple[int, int],
     V_dot_n = V @ P_normal
     if abs(V_dot_n) < 1e-6:
         # Ray is parallel or pointing away, cannot intersect
-        return drone_telemetry.position # Return drone position as fallback
+        return drone_telemetry.position_local # Return drone position as fallback
         
     # Calculate intersection parameter 't'
     t = ((P_origin - P0) @ P_normal) / V_dot_n
     
     if t < 0:
         # Intersection is *behind* the camera (e.g., drone is below ground)
-        return drone_telemetry.position
+        return drone_telemetry.position_local
     
     # 6. Calculate Intersection Point
     P_intersect = P0 + t * V
     
-    return Position(x=P_intersect[0], y=P_intersect[1], z=P_intersect[2])
+    return LocalPosition(x=P_intersect[0], y=P_intersect[1], z=P_intersect[2])

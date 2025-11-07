@@ -5,6 +5,7 @@ This file initializes and runs all Tier 2 Hub services.
 
 import asyncio
 import os
+from pathlib import Path # <-- NEW
 from drone.core.cross_cutting.communication import MqttClient
 # --- FIX 3.2: Import config loader ---
 from drone.core.utils.config_models import load_config
@@ -15,11 +16,29 @@ from .charging_monitor import ChargingMonitor
 from .satellite_relay import SatelliteRelay
 
 # --- Configuration ---
-# --- FIX 3.2: Load config from file ---
+# --- FIX: Updated config loading to match drone/main.py ---
 CONFIG_FILE = os.environ.get("COBALT_CONFIG", "config/system_config.yaml")
-config = load_config(CONFIG_FILE)
+
+# Load the main system config (network, plugins, etc.)
+system_config = load_config(CONFIG_FILE)
+
+# Find and load the fleet config (assuming it's in the same 'config' dir)
+config_dir = Path(CONFIG_FILE).parent
+fleet_config_path = config_dir / "fleet_config.yaml"
+
+if not fleet_config_path.exists():
+    print(f"[HubMain] CRITICAL: fleet_config.yaml not found at {fleet_config_path}")
+    raise FileNotFoundError(f"fleet_config.yaml not found at {fleet_config_path}")
+
+print(f"[HubMain] Loading fleet config from {fleet_config_path}...")
+fleet_config_data = load_config(str(fleet_config_path)) # This will be a dict, e.g., {"fleet": {...}}
+
+# Merge them.
+config = {**system_config, **fleet_config_data}
+# --- END OF FIX ---
+
 network_config = config.get("network", {})
-fleet_config = config.get("fleet", {})
+fleet_config = config.get("fleet", {}) # <-- This will now be populated
 
 MQTT_HOST = os.environ.get("MQTT_HOST", network_config.get("mqtt_broker_host", "localhost"))
 MQTT_PORT = int(os.environ.get("MQTT_PORT", network_config.get("mqtt_broker_port", 1883)))
@@ -38,6 +57,7 @@ async def main():
 
     # 2. Initialize Core Hub Components
     # --- FIX 3.2: Pass fleet_config to FleetCoordinator ---
+    # This will now work correctly because fleet_config is loaded
     fleet_coord = FleetCoordinator(hub_comms, fleet_config)
     # --- End of FIX 3.2 ---
     gcs_server = GcsServer(fleet_coord, port=GCS_PORT)

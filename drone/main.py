@@ -88,14 +88,16 @@ async def main():
         fleet_config_data = load_config(str(fleet_config_path)) # This will be a dict, e.g., {"fleet": {...}}
 
         # --- NEW: Load separate safety config ---
-        # Assumes main.py is run from the project root (where /config and /drone are)
-        safety_config_path = "drone/config/safety_config.yaml"
+        # --- FIX: Changed path to load from root /config directory ---
+        safety_config_path = config_dir / "safety_config.yaml"
+        # --- End of FIX ---
+        
         if not Path(safety_config_path).exists():
             logger.log(f"WARNING: {safety_config_path} not found. Safety monitor may not be configured.", "warning")
             safety_config_data = {}
         else:
             logger.log(f"Loading safety config from {safety_config_path}...", "info")
-            safety_config_data = load_config(safety_config_path)
+            safety_config_data = load_config(str(safety_config_path))
         # --- End of NEW ---
 
         # Merge them. The fleet and safety data is top-priority.

@@ -14,8 +14,9 @@ from enum import Enum, auto
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Callable, Set
 
-# Re-using the Waypoint definition from G3 strategies
-from ..g3_capability_plugins.strategies.base import Waypoint
+# --- FIX: Import the new explicit position types ---
+from ..utils.position import LocalPosition, GlobalPosition
+# --- End of FIX ---
 
 class VehicleModeEnum(Enum):
     """Possible flight controller modes."""
@@ -26,6 +27,8 @@ class VehicleModeEnum(Enum):
     RTL = auto()        # Autonomous Return-to-Launch
     LAND = auto()       # Autonomous Land
     EMERGENCY = auto()  # Failsafe mode
+    # --- NEW: Added from ArduPilot HAL ---
+    PAUSED = auto()     # e.g., BRAKE mode
 
 class GPSStatusEnum(Enum):
     """GPS fix quality."""
@@ -42,7 +45,12 @@ class Telemetry:
     This is what the HAL (G4) produces and VehicleState (G4) consumes.
     """
     timestamp: float = field(default_factory=time.monotonic)
-    position: Waypoint = field(default_factory=lambda: Waypoint(0,0,0))
+    
+    # --- FIX: Replaced ambiguous 'position' with explicit types ---
+    position_global: GlobalPosition = field(default_factory=GlobalPosition)
+    position_local: LocalPosition = field(default_factory=LocalPosition)
+    # --- End of FIX ---
+    
     mode: VehicleModeEnum = VehicleModeEnum.DISARMED
     gps_status: GPSStatusEnum = GPSStatusEnum.NO_FIX
     battery_percent: float = 100.0
@@ -107,10 +115,17 @@ class VehicleState:
         """Get the latest telemetry snapshot."""
         return self._current_telemetry
 
+    # --- FIX: Replaced 'position' with explicit properties ---
     @property
-    def position(self) -> Waypoint:
-        """Get current drone position."""
-        return self._current_telemetry.position
+    def position_local(self) -> LocalPosition:
+        """Get current drone position in local X,Y,Z (meters) frame."""
+        return self._current_telemetry.position_local
+    
+    @property
+    def position_global(self) -> GlobalPosition:
+        """Get current drone position in Global Lat,Lon,Alt frame."""
+        return self._current_telemetry.position_global
+    # --- End of FIX ---
     
     @property
     def mode(self) -> VehicleModeEnum:
@@ -134,6 +149,6 @@ class VehicleState:
         return (
             f"VehicleState(Mode: {self.mode.name}, "
             f"Batt: {self.battery_percent:.1f}%, "
-            f"Pos: {self.position.x}, {self.position.y}, {self.position.z})"
+            f"Local: {self.position_local}, "
+            f"Global: {self.position_global})"
         )
-
