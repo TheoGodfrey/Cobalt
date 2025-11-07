@@ -5,8 +5,6 @@ Generic flow interpreter - NO mission-specific logic
 import asyncio
 from typing import Optional, Dict, Set, Any, List, Coroutine
 
-from drone.core.g4_platform_interface.vehicle_state import VehicleState
-
 from ..g1_mission_definition.mission_flow import MissionFlow
 # Import the enum as well to map strings to enum members
 from ..g2_execution_core.mission_state import (
@@ -15,12 +13,13 @@ from ..g2_execution_core.mission_state import (
 )
 from ..g2_execution_core.behaviors import BehaviorFactory, BaseBehavior
 from ..cross_cutting.communication import MqttClient # <-- NEW
+from ..g4_platform_interface.vehicle_state import VehicleState # <-- NEW
 
 class MissionController:
     """Generic orchestrator that executes any mission from JSON"""
     
     def __init__(self, mission_flow: MissionFlow, flight_controller, 
-                 vehicle_state: VehicleState, mqtt: MqttClient, safety_monitor, config, 
+                 vehicle_state: VehicleState, mqtt: MqttClient, safety_monitor, config, # <-- MODIFIED
                  hardware_list: List[str], drone_role: str,
                  mission_active_event: asyncio.Event): # <-- MODIFIED
         self.mission_flow = mission_flow
