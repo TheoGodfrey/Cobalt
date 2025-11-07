@@ -63,9 +63,20 @@ class BaseFlightController(ABC):
     async def goto(self, waypoint: Waypoint) -> bool:
         """
         Fly to a specific waypoint.
-        Returns True on arrival, False on failure.
+        **BLOCKING**: Returns True on arrival, False on failure.
         """
         pass
+        
+    # --- THIS IS THE FIX ---
+    @abstractmethod
+    async def set_target_waypoint(self, waypoint: Waypoint):
+        """
+        Set a new target waypoint for the vehicle to fly towards.
+        **NON-BLOCKING**: Returns immediately.
+        Used for continuous tracking.
+        """
+        pass
+    # --- END OF FIX ---
         
     @abstractmethod
     async def land(self) -> bool:

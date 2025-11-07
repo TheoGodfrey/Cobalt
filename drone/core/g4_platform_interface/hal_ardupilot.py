@@ -424,6 +424,40 @@ class ArduPilotController(BaseFlightController):
             return False
     # --- END OF FIX ---
 
+    # --- THIS IS THE FIX ---
+    async def set_target_waypoint(self, waypoint: Waypoint):
+        """
+        Sets a new target waypoint for the vehicle to fly towards.
+        NON-BLOCKING.
+        """
+        if not self.vehicle or not self.vehicle.armed or self.vehicle.mode.name != "GUIDED":
+            # Don't send if not in a valid state
+            return
+            
+        if not self._home_location:
+            # Can't translate, so can't send command
+            if self._last_mode: # Avoid spamming
+                log.warning("[HAL-ArduPilot] set_target_waypoint: No home location, cannot translate.")
+            return
+
+        try:
+            # 1. Translate local Waypoint to global coordinates
+            global_target = self._translate_local_to_global(waypoint)
+            
+            # 2. Create DroneKit location object
+            target_location = LocationGlobalRelative(global_target.lat, global_target.lon, global_target.alt)
+
+            # 3. Send command (non-blocking)
+            # We assume a default groundspeed
+            self.vehicle.simple_goto(target_location, groundspeed=5.0)
+            
+            # 4. Return immediately
+            
+        except Exception as e:
+            # Log error but don't block
+            log.error(f"[HAL-ArduPilot] Failed to execute set_target_waypoint: {e}")
+    # --- END OF FIX ---
+
     async def set_roi(self, lat: float, lon: float, alt_m: float):
         """
         Commands the vehicle (and gimbal) to look at a Region of Interest.

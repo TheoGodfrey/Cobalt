@@ -239,6 +239,22 @@ class SimulatedController(BaseFlightController):
             
         return True
 
+    # --- THIS IS THE FIX ---
+    async def set_target_waypoint(self, waypoint: Waypoint):
+        """
+        Sets a new target waypoint for the simulator.
+        NON-BLOCKING.
+        """
+        if self.vehicle_state.mode != VehicleModeEnum.GUIDED:
+            # Don't set target if not in the right mode
+            return
+            
+        # The background _update_telemetry loop will see this new
+        # _target_pos and start moving towards it on its next tick.
+        self._target_pos = waypoint
+        # No await, return immediately
+    # --- END OF FIX ---
+
     async def land(self) -> bool:
         print("[SimulatedHAL] Landing...")
         await self.goto(Waypoint(self._current_pos.x, self._current_pos.y, 0))
