@@ -11,7 +11,7 @@ from ..g2_execution_core.mission_state import (
     MissionState, MissionStateEnum, 
     MISSION_PHASE_TO_ENUM, MISSION_ENUM_TO_PHASE # <-- FIX for Bug #11
 )
-from ..g2_execution_core.behaviors import BehaviorFactory, BaseBehavior
+from .behaviors import BehaviorFactory, BaseBehavior
 from ..cross_cutting.communication import MqttClient # <-- NEW
 from ..g4_platform_interface.vehicle_state import VehicleState # <-- NEW
 
