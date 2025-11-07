@@ -138,6 +138,10 @@ class MqttClient:
                 log.error(f"[MQTT-{self._client_id}] Error in message callback for {topic}: {e}")
         else:
             log.debug(f"[MQTT-{self._client_id}] Received message on unhandled topic: {topic}")
+        
+    def is_connected(self) -> bool:
+        """Checks if the client is currently connected to the broker."""
+        return self._client.is_connected()    
 
     async def connect(self):
         """
@@ -165,8 +169,8 @@ class MqttClient:
             # Publish an 'online' message to our LWT topic
         # Publish an 'online' message to our LWT topic
             online_payload = {"status": "online", "drone_id": self._client_id}
-            await self.publish(f"{self.LWT_TOPIC_PREFIX}/{self._client_id}", online_payload, retain=True)
-        
+            if self.is_connected(): # <-- ADD THIS CHECK
+                await self.publish(f"{self.LWT_TOPIC_PREFIX}/{self._client_id}", online_payload, retain=True)
         except Exception as e:
             log.error(f"[MQTT-{self._client_id}] Failed to connect: {e}")
 
@@ -175,7 +179,8 @@ class MqttClient:
         log.info(f"[MQTT-{self._client_id}] Disconnecting...")
         # Publish 'offline' message gracefully
         lwt_payload = {"status": "offline", "drone_id": self._client_id}
-        await self.publish(f"{self.LWT_TOPIC_PREFIX}/{self._client_id}", lwt_payload, retain=True)
+        if self.is_connected(): # <-- ADD THIS CHECK
+            await self.publish(f"{self.LWT_TOPIC_PREFIX}/{self._client_id}", lwt_payload, retain=True)
         
         self._client.loop_stop() # Stop the background thread
         self._client.disconnect()

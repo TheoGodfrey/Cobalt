@@ -94,11 +94,12 @@ class FleetCoordinator:
                 self.confirmed_target = detection
                 
                 # Broadcast the confirmed target to all drones
-                await self.comms.publish("fleet/target_confirmed", {
-                    "position": self.confirmed_target['position'],
-                    "confidence": 1.0,
-                    "supporting_drones": list(self.active_detections.keys())
-                })
+                if self.comms.is_connected():
+                    await self.comms.publish("fleet/target_confirmed", {
+                        "position": self.confirmed_target['position'],
+                        "confidence": 1.0,
+                        "supporting_drones": list(self.active_detections.keys())
+                    })
                 
                 # Tell drones to switch to delivery phase (simplified)
                 await self.assign_phase("delivery")
@@ -181,7 +182,8 @@ class FleetCoordinator:
                     "phase": phase_name,
                     "task": asdict(task) # Send task config
                 }
-                await self.comms.publish(f"fleet/commands/{drone_id}", command)
+                if self.comms.is_connected():
+                    await self.comms.publish(f"fleet/commands/{drone_id}", command)
             else:
                 # No task defined for this role in this phase (e.g., "payload" drone during "scout" phase)
                 print(f"  -> No task for {drone_id} (Role: {drone_role}) in this phase. Sending IGNORE.")

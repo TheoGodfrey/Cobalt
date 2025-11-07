@@ -83,7 +83,8 @@ class SafetyMonitor:
             # await self.trigger_rth()
             print("[SafetyMonitor] HIGH: Triggering RTH (Simulated)")
         
-        await self.mqtt.publish("fleet/safety/violation", violation)
+        if self.mqtt.is_connected():
+            await self.mqtt.publish("fleet/safety/violation", violation)
 
 # --- Individual Checker Implementations ---
 

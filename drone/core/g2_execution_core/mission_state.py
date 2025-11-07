@@ -32,6 +32,9 @@ class MissionStateEnum(Enum):
     # Add PATROLLING as requested by mission_controller
     PATROLLING = auto() 
 
+# --- NEW: Add failure state ---
+    NAVIGATION_FAILURE = auto()
+
 # --- FIX for Bug #11: Add explicit mappings ---
 
 # A mapping from mission file phase names (strings) to enum members
@@ -48,6 +51,7 @@ MISSION_PHASE_TO_ENUM: Dict[str, MissionStateEnum] = {
     "aborted": MissionStateEnum.ABORTED,
     "mission_complete": MissionStateEnum.MISSION_COMPLETE,
     "patrolling": MissionStateEnum.PATROLLING,
+    "navigation_failure": MissionStateEnum.NAVIGATION_FAILURE,
 }
 
 # A reverse mapping from enum members to phase names (strings)
@@ -131,7 +135,8 @@ def get_mission_transitions() -> Dict[MissionStateEnum, Set[MissionStateEnum]]:
     global_transitions = {
         MissionStateEnum.PAUSED, 
         MissionStateEnum.EMERGENCY_RTH, 
-        MissionStateEnum.ABORTED
+        MissionStateEnum.ABORTED,
+        MissionStateEnum.NAVIGATION_FAILURE
     }
     active_states = {
         MissionStateEnum.STARTING,
@@ -148,7 +153,15 @@ def get_mission_transitions() -> Dict[MissionStateEnum, Set[MissionStateEnum]]:
             transitions[state].update(global_transitions)
         else:
             transitions[state] = global_transitions
-            
+
+
+    transitions[MissionStateEnum.NAVIGATION_FAILURE] = {
+        MissionStateEnum.EMERGENCY_RTH,
+        MissionStateEnum.ABORTED,
+        MissionStateEnum.IDLE,
+        MissionStateEnum.RETURNING # Allow it to be handled by triggering RTH
+    }
+    
     return transitions
 
 
