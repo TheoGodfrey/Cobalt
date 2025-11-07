@@ -303,13 +303,13 @@ class ArduPilotController(BaseFlightController):
 
         # --- Get Location ---
         pos = Waypoint(telem.position.x, telem.position.y, telem.position.z)
-        if self.vehicle.location.global_relative_frame:
+        loc = self.vehicle.location.global_relative_frame # <-- Get the object
+        if loc and loc.lat is not None and loc.lon is not None and loc.alt is not None:
             loc = self.vehicle.location.global_relative_frame
             # Note: G3 Strategies use X,Y,Z. This HAL provides Lat/Lon/Alt.
             # This is a different inconsistency, but for now we'll update
             # the Waypoint with Lat/Lon/Alt.
             pos = Waypoint(x=loc.lat, y=loc.lon, z=loc.alt, yaw=telem.position.yaw)
-        
         # --- FIX 1.1: Get full attitude ---
         # Get defaults from current state
         att_roll = telem.attitude_roll

@@ -34,6 +34,7 @@ class MissionStateEnum(Enum):
 
 # --- NEW: Add failure state ---
     NAVIGATION_FAILURE = auto()
+    ACTUATOR_FAILURE = auto()
 
 # --- FIX for Bug #11: Add explicit mappings ---
 
@@ -52,6 +53,7 @@ MISSION_PHASE_TO_ENUM: Dict[str, MissionStateEnum] = {
     "mission_complete": MissionStateEnum.MISSION_COMPLETE,
     "patrolling": MissionStateEnum.PATROLLING,
     "navigation_failure": MissionStateEnum.NAVIGATION_FAILURE,
+    "actuator_failure": MissionStateEnum.ACTUATOR_FAILURE
 }
 
 # A reverse mapping from enum members to phase names (strings)
@@ -136,7 +138,8 @@ def get_mission_transitions() -> Dict[MissionStateEnum, Set[MissionStateEnum]]:
         MissionStateEnum.PAUSED, 
         MissionStateEnum.EMERGENCY_RTH, 
         MissionStateEnum.ABORTED,
-        MissionStateEnum.NAVIGATION_FAILURE
+        MissionStateEnum.NAVIGATION_FAILURE,
+        MissionStateEnum.ACTUATOR_FAILURE
     }
     active_states = {
         MissionStateEnum.STARTING,

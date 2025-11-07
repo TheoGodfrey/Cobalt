@@ -52,10 +52,10 @@ class FleetCoordinator:
     # --- End of FIX 3.2 ---
 
     # --- FIX 3.2: Modified to populate role on first contact ---
-    async def _handle_telemetry(self, msg: Dict[str, Any]):
+    async def _handle_telemetry(self, topic: str, payload: Dict[str, Any]): # <-- MODIFIED
         """Callback for processing telemetry messages."""
         try:
-            drone_id = msg['drone_id']
+            drone_id = payload['drone_id']
             if drone_id not in self.fleet_state:
                 # Get role from config, default to 'unknown'
                 role = self.fleet_config.get(drone_id, {}).get('role', 'unknown')
@@ -63,8 +63,8 @@ class FleetCoordinator:
                 print(f"[FleetCoordinator] New drone connected: {drone_id} (Role: {role})")
 
             state = self.fleet_state[drone_id]
-            state.last_telemetry = msg['telemetry']
-            state.mission_state = msg['mission_state']
+            state.last_telemetry = payload['telemetry']
+            state.mission_state = payload['mission_state']
             state.last_heartbeat = time.monotonic()
             
             # print(f"[FleetCoordinator] Telemetry from {drone_id}: {state.mission_state}")
@@ -72,15 +72,15 @@ class FleetCoordinator:
             print(f"[FleetCoordinator] Malformed telemetry message: {e}")
     # --- End of FIX 3.2 ---
 
-    async def _handle_detections(self, msg: Dict[str, Any]):
+    async def _handle_detections(self, topic: str, payload: Dict[str, Any]):
         """
         Handles incoming detections. Implements Hub-Mediated Consensus.
         (From Spec Appendix A.2)
         """
         try:
             # ... existing _handle_detections logic ...
-            drone_id = msg['drone_id']
-            detection = msg['detection']
+            drone_id = payload['drone_id']
+            detection = payload['detection']
             detection_id = detection['track_id']
             
             print(f"[FleetCoordinator] Received detection {detection_id} from {drone_id}")

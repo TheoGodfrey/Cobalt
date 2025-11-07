@@ -89,7 +89,7 @@ class BaseBehavior(ABC):
         self.actuator: Optional[Actuator] = dependencies.get("actuator")
 
         self.MAX_CONSECUTIVE_FAILURES = 3 # Max retries
-        self._failure_count = 0
+        self._failure_counts: Dict[str, int] = {}
 
     async def start(self):
         """Starts the behavior's run loop as an async task."""
@@ -114,24 +114,36 @@ class BaseBehavior(ABC):
         self._task = None
         print(f"[{self.__class__.__name__}] Stopped.")
 
-    def _reset_failures(self):
+    def _reset_failures(self, failure_type: str = "navigation"):
         """Resets the consecutive failure count."""
-        if self._failure_count > 0:
-            print(f"[{self.__class__.__name__}] Action successful, resetting failure count.")
-        self._failure_count = 0
+        if self._failure_counts.get(failure_type, 0) > 0:
+            print(f"[{self.__class__.__name__}] Action '{failure_type}' successful, "
+                  f"resetting failure count.")
+            self._failure_counts[failure_type] = 0
+            
 
-    def _increment_failure(self, failure_type: str = "navigation"):
-        """Increments failure count and triggers failure state if threshold is met."""
-        self._failure_count += 1
-        print(f"[{self.__class__.__name__}] WARNING: A {failure_type} failure occurred "
-              f"({self._failure_count}/{self.MAX_CONSECUTIVE_FAILURES}).")
+    def _increment_failure(self, failure_type: str = "unknown"):
+        """Increments failure count for a type and triggers failure state if threshold is met."""
+        # Increment the count for this specific failure type
+        current_failures = self._failure_counts.get(failure_type, 0) + 1
+        self._failure_counts[failure_type] = current_failures
         
-        if self._failure_count >= self.MAX_CONSECUTIVE_FAILURES:
-            print(f"[{self.__class__.__name__}] CRITICAL: Failure threshold reached. "
-                  f"Transitioning to NAVIGATION_FAILURE.")
-            # This transition will be caught by the MissionController
-            self.mission_state.transition(MissionStateEnum.NAVIGATION_FAILURE)
-    # --- End of NEW
+        print(f"[{self.__class__.__name__}] WARNING: A {failure_type} failure occurred "
+              f"({current_failures}/{self.MAX_CONSECUTIVE_FAILURES}).")
+        
+        if current_failures >= self.MAX_CONSECUTIVE_FAILURES:
+            print(f"[{self.__class__.__name__}] CRITICAL: Failure threshold reached for '{failure_type}'. "
+                  f"Transitioning to failure state.")
+            
+            # --- Transition to the correct failure state ---
+            if failure_type == "navigation":
+                self.mission_state.transition(MissionStateEnum.NAVIGATION_FAILURE)
+            elif failure_type == "actuator":
+                self.mission_state.transition(MissionStateEnum.ACTUATOR_FAILURE)
+            else:
+                # Fallback to a general abort if type is unknown
+                print(f"[{self.__class__.__name__}] Unknown failure type '{failure_type}', ABORTING.")
+                self.mission_state.transition(MissionStateEnum.ABORTED)
 
     @abstractmethod
     async def run(self):
@@ -172,8 +184,10 @@ class SearchBehavior(BaseBehavior):
                 arrival_success = await self.hal.goto(waypoint)
                 if not arrival_success:
                     print(f"[SearchBehavior] Failed to reach waypoint.")
-                    # Implement retry logic or abort
+                    self._increment_failure("navigation") 
                     continue
+                
+                self._reset_failures("navigation") # <-- SPECIFY "navigation" # Reset on successful goto
 
                 # 4. At waypoint, use the injected Detector to look for target
                 print(f"[SearchBehavior] At waypoint, scanning for target...")
@@ -229,18 +243,21 @@ class DeliveryBehavior(BaseBehavior):
                     print(f"[DeliveryBehavior] Failed to reach drop point.")
                     continue
 
+                self._reset_failures()  # Reset on successful goto
+
                 # 4. At drop point, command the injected Actuator to execute
                 print(f"[DeliveryBehavior] At drop point, executing payload release...")
                 release_success = await self.actuator.execute()
                 
                 if release_success:
                     print(f"[DeliveryBehavior] *** Payload Released Successfully! ***")
+                    self._reset_failures("actuator") # <-- SPECIFY "actuator"
                     # This trigger will be caught by the MissionController
                     self.mission_state.transition(MissionStateEnum.RETURNING)
                 else:
                     print(f"[DeliveryBehavior] Payload release failed!")
                     # Implement retry logic or abort
-                    self.mission_state.transition(MissionStateEnum.ABORTED)
+                    self._increment_failure("actuator")
                 
                 break # Delivery is usually a one-shot action
         except asyncio.CancelledError:
