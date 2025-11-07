@@ -5,9 +5,8 @@
  */
 
 import { connectWebSocket, sendCommand } from './websocket.js';
-// --- FIX 3.3: Import updateDroneMarker, removeDroneMarker is no longer needed here ---
-import { initMap, updateDroneMarker } from './map.js';
-// --- End of FIX 3.3 ---
+// --- FIX: Import removeDroneMarker ---
+import { initMap, updateDroneMarker, removeDroneMarker } from './map.js';
 import { showVideoFeed } from './video.js';
 
 // --- DOM Elements ---
@@ -20,7 +19,10 @@ const missionFileInput = document.getElementById('missionFile');
 
 
 // --- State ---
-const fleet = {}; // Object to store drone states
+// This object will be the single source of truth for fleet state
+let fleet = {}; 
+// Keep track of markers on the map
+let markersOnMap = new Set();
 
 // --- Initialization ---
 document.addEventListener('DOMContentLoaded', () => {
@@ -51,46 +53,16 @@ function onSocketOpen() {
 }
 
 function onSocketMessage(msg) {
-    // Log all messages
-    logMessage(`HUB: ${JSON.stringify(msg)}`);
-
-    // --- FIX 3.3: Simplified message handling ---
-    let droneId = msg.payload?.drone_id;
-    if (!droneId) {
-        // Handle non-drone messages like PONG or ERROR
-        return;
+    // --- FIX: This is the new message handling logic ---
+    if (msg.type === 'FLEET_STATE_UPDATE') {
+        handleFleetUpdate(msg.data);
+    } else if (msg.type === 'PONG') {
+        // Handle pong messages if needed
+    } else {
+        // Log any other message types
+        logMessage(`HUB: ${JSON.stringify(msg)}`);
     }
-
-    // Ensure drone exists in fleet state
-    if (!fleet[droneId]) {
-        fleet[droneId] = { state: 'UNKNOWN' }; // Create new entry
-    }
-
-    let drone = fleet[droneId];
-
-    // Update state based on message type
-    switch (msg.type) {
-        case 'lwt':
-            drone.state = msg.payload.status ? msg.payload.status.toUpperCase() : 'UNKNOWN';
-            drone.lwt_timestamp = Date.now();
-            break;
-        case 'telemetry':
-            drone.battery = msg.payload.battery_percent;
-            drone.position = `(${msg.payload.latitude.toFixed(4)}, ${msg.payload.longitude.toFixed(4)}) @ ${msg.payload.relative_altitude.toFixed(0)}m`;
-            // Update map
-            updateDroneMarker(droneId, msg.payload.latitude, msg.payload.longitude, msg.payload.yaw || 0, drone.state);
-            break;
-        case 'detection':
-            drone.last_detection = `Found ${msg.payload.class_label} (${msg.payload.confidence.toFixed(2)})`;
-            break;
-        case 'phase_update':
-            drone.state = msg.payload.phase_name ? `${msg.payload.phase_name} (${msg.payload.mission_state})` : 'UNKNOWN';
-            break;
-    }
-    
-    drone.last_update = Date.now();
-    renderFleetList();
-    // --- End of FIX 3.3 ---
+    // --- End of FIX ---
 }
 
 function onSocketClose() {
@@ -110,73 +82,89 @@ function logMessage(message) {
     log.textContent = `[${new Date().toLocaleTimeString()}] ${message}\n` + log.textContent;
 }
 
-// --- FIX 3.3: This function is now simplified ---
-// It just passes data to renderFleetList and updateDroneMarker
-function updateFleetStatus(droneId, data) {
-    if (!fleet[droneId]) {
-        fleet[droneId] = {}; // Create new entry if not exists
+// --- NEW: Main function to process the fleet snapshot ---
+function handleFleetUpdate(data) {
+    // 1. Rebuild the fleet state from the snapshot
+    const newFleet = {};
+    const droneIdsInUpdate = new Set();
+    
+    for (const drone of data.drones) {
+        newFleet[drone.drone_id] = drone;
+        droneIdsInUpdate.add(drone.drone_id);
     }
+    fleet = newFleet;
 
-    // Update state
-    if (data.status) { // LWT message
-        fleet[droneId].state = data.status.toUpperCase();
-        fleet[droneId].lwt_timestamp = Date.now();
-        // --- FIX 3.3: REMOVED removeDroneMarker(droneId); ---
-    }
-    if (data.mission_state) { // From phase update
-        fleet[droneId].state = `${data.phase_name} (${data.mission_state})`;
-    }
-    if (data.battery_percent) { // Telemetry
-        fleet[droneId].battery = data.battery_percent;
-        fleet[droneId].position = `(${data.latitude.toFixed(4)}, ${data.longitude.toFixed(4)}) @ ${data.relative_altitude.toFixed(0)}m`;
-        // --- FIX 3.3: Pass the drone's state to the map marker ---
-        updateDroneMarker(droneId, data.latitude, data.longitude, data.yaw || 0, fleet[droneId].state);
-    }
-    if (data.last_detection) {
-        fleet[droneId].last_detection = `Found ${data.last_detection.class_label} (${data.last_detection.confidence.toFixed(2)})`;
+    // 2. Re-render the entire fleet list UI
+    renderFleetList();
+    
+    // 3. Update all map markers
+    for (const drone of Object.values(fleet)) {
+        const telem = drone.last_telemetry;
+        
+        // Check if telemetry and location data exist
+        if (telem && telem.latitude != null && telem.longitude != null) {
+            updateDroneMarker(
+                drone.drone_id, 
+                telem.latitude, 
+                telem.longitude, 
+                telem.yaw || 0, 
+                drone.mission_state
+            );
+            markersOnMap.add(drone.drone_id);
+        }
     }
     
-    fleet[droneId].last_update = Date.now();
-    renderFleetList();
+    // 4. Remove any map markers for drones that are no longer in the fleet
+    for (const droneId of markersOnMap) {
+        if (!droneIdsInUpdate.has(droneId)) {
+            removeDroneMarker(droneId);
+            markersOnMap.delete(droneId);
+        }
+    }
 }
-// --- End of FIX 3.3 ---
+// --- End of NEW ---
 
-// --- FIX 3.3: renderFleetList now renders ALL drones ---
+
 function renderFleetList() {
     if (!fleetList) return;
     fleetList.innerHTML = ''; // Clear list
     
-    // --- FIX 3.3: Get all drones, not just connected ones ---
-    const allDrones = Object.keys(fleet);
-    // --- End of FIX 3.3 ---
+    const allDrones = Object.values(fleet);
 
     if (allDrones.length === 0) {
          fleetList.innerHTML = '<p class="text-gray-500">No drones connected...</p>';
          return;
     }
 
-    // --- FIX 3.3: Loop over allDrones ---
-    for (const droneId of allDrones) {
-        const drone = fleet[droneId];
-        // --- FIX 3.3: Check state for styling ---
-        const isOffline = drone.state === 'OFFLINE';
-        const stateColor = isOffline ? 'text-gray-500' : (drone.state === 'ONLINE' ? 'text-green-400' : 'text-yellow-400');
+    for (const drone of allDrones) {
+        // --- FIX: Get state and telemetry from the correct snapshot structure ---
+        const state = drone.mission_state || 'UNKNOWN';
+        const telem = drone.last_telemetry || {};
+        
+        const isOffline = (state === 'OFFLINE');
+        const stateColor = isOffline ? 'text-gray-500' : (state === 'IDLE' ? 'text-green-400' : 'text-yellow-400');
         const cardOpacity = isOffline ? 'opacity-50' : '';
-        // --- End of FIX 3.3 ---
+        
+        const battery = telem.battery_percent;
+        const position = (telem.latitude != null) ?
+            `(${telem.latitude.toFixed(4)}, ${telem.longitude.toFixed(4)}) @ ${telem.relative_altitude?.toFixed(0) || '?'}m` :
+            'No position data';
+        
+        // --- End of FIX ---
         
         const html = `
             <div class="bg-gray-700 p-4 rounded-lg ${cardOpacity}">
                 <div class="flex justify-between items-center">
-                    <span class="text-lg font-bold">${droneId}</span>
-                    <span class="font-mono ${stateColor}">${drone.state || 'UNKNOWN'}</span>
+                    <span class="text-lg font-bold">${drone.drone_id}</span>
+                    <span class="font-mono ${stateColor}">${state}</span>
                 </div>
                 <div class="text-sm text-gray-300 mt-2 space-y-1">
-                    ${drone.battery ? `<div><strong>Battery:</strong> ${drone.battery.toFixed(1)}%</div>` : ''}
-                    ${drone.position ? `<div><strong>Position:</strong> ${drone.position}</div>` : ''}
+                    ${battery != null ? `<div><strong>Battery:</strong> ${battery.toFixed(1)}%</div>` : '<div><strong>Battery:</strong> N/A</div>'}
+                    <div><strong>Position:</strong> ${position}</div>
                     ${drone.last_detection ? `<div class="text-cyan-300"><strong>Detection:</strong> ${drone.last_detection}</div>` : ''}
                 </div>
                 <div class="mt-4">
-                    <button class="show-video-btn bg-gray-600 hover:bg-gray-500 text-white text-sm py-1 px-3 rounded" data-drone-id="${droneId}">
+                    <button class="show-video-btn bg-gray-600 hover:bg-gray-500 text-white text-sm py-1 px-3 rounded" data-drone-id="${drone.drone_id}">
                         Show Video
                     </button>
                 </div>
@@ -184,7 +172,6 @@ function renderFleetList() {
         `;
         fleetList.innerHTML += html;
     }
-    // --- End of FIX 3.3 ---
     
     // Add event listeners to the new video buttons
     document.querySelectorAll('.show-video-btn').forEach(btn => {
@@ -220,4 +207,3 @@ function onAbortAll() {
     sendCommand(command);
     logMessage("GCS: Sent ABORT_ALL (RTH) command.");
 }
-

@@ -5,6 +5,8 @@ Generic flow interpreter - NO mission-specific logic
 import asyncio
 from typing import Optional, Dict, Set, Any, List, Coroutine
 
+from drone.core.g4_platform_interface.vehicle_state import VehicleState
+
 from ..g1_mission_definition.mission_flow import MissionFlow
 # Import the enum as well to map strings to enum members
 from ..g2_execution_core.mission_state import (
@@ -12,12 +14,13 @@ from ..g2_execution_core.mission_state import (
     MISSION_PHASE_TO_ENUM, MISSION_ENUM_TO_PHASE # <-- FIX for Bug #11
 )
 from ..g2_execution_core.behaviors import BehaviorFactory, BaseBehavior
+from ..cross_cutting.communication import MqttClient # <-- NEW
 
 class MissionController:
     """Generic orchestrator that executes any mission from JSON"""
     
     def __init__(self, mission_flow: MissionFlow, flight_controller, 
-                 vehicle_state, mqtt, safety_monitor, config, 
+                 vehicle_state: VehicleState, mqtt: MqttClient, safety_monitor, config, 
                  hardware_list: List[str], drone_role: str,
                  mission_active_event: asyncio.Event): # <-- MODIFIED
         self.mission_flow = mission_flow
@@ -41,7 +44,12 @@ class MissionController:
         # An event that the main loop waits on, set by *any* valid trigger
         self._trigger_event_fired = asyncio.Event()
         self._fired_trigger: Optional[str] = None
-        self._event_lock = asyncio.Lock()
+        self._event_lock = asyncio.Lock() # Lock for _current_phase_triggers
+        
+        # --- NEW: Concurrency lock for transitions ---
+        self._is_transitioning = False
+        self._transition_lock = asyncio.Lock()
+        # --- End of NEW ---
         
         # The persistent MQTT listener task
         self._mqtt_listener_task: Optional[asyncio.Task] = None
@@ -82,48 +90,60 @@ class MissionController:
             
             # Check if mission is complete (e.g., if start_phase was RTH)
             while not self.mission_state.current in (MissionStateEnum.MISSION_COMPLETE, MissionStateEnum.ABORTED, MissionStateEnum.IDLE) and self.mission_active_event.is_set(): # <-- MODIFIED
-                # Get current phase definition from JSON
                 
-                # --- FIX for Bug #11 (This is the line 73 issue) ---
-                if self.mission_state.current not in MISSION_ENUM_TO_PHASE:
-                    raise ValueError(f"Current state '{self.mission_state.current.name}' has no mapping to a phase key.")
-                current_phase_key = MISSION_ENUM_TO_PHASE[self.mission_state.current]
-                # --- End of Fix ---
-                
-                phase = self.mission_flow.phases[current_phase_key]
-                
-                # Execute all tasks for this drone's role
-                drone_role = self.drone_role # <-- MODIFIED
-                if drone_role in phase.tasks:
-                    task = phase.tasks[drone_role]
+                # --- NEW: Start of atomic transition section ---
+                # We acquire the lock here to ensure the *entire* transition
+                # from one phase to the next is atomic.
+                async with self._transition_lock:
+                    self._is_transitioning = True # Set flag to block new triggers
                     
-                    # FIX: Pass all required dependencies to the factory
-                    current_behavior = self.behavior_factory.create(
-                        task, 
-                        self.mission_state, 
-                        self.flight_controller  # The HAL is passed in as flight_controller
-                    )
-                    await current_behavior.start()
-                
-                # --- REFACTORED: Event-driven trigger logic ---
-                transitions = phase.transitions
-                if not transitions:
-                    print(f"[MissionController] Phase '{current_phase_key}' has no transitions. Mission will end.")
-                    break # No transitions, exit loop
+                    # 1. Get current phase definition from JSON
+                    if self.mission_state.current not in MISSION_ENUM_TO_PHASE:
+                        raise ValueError(f"Current state '{self.mission_state.current.name}' has no mapping to a phase key.")
+                    current_phase_key = MISSION_ENUM_TO_PHASE[self.mission_state.current]
+                    
+                    phase = self.mission_flow.phases[current_phase_key]
+                    
+                    # 2. Execute all tasks for this drone's role
+                    drone_role = self.drone_role # <-- MODIFIED
+                    if drone_role in phase.tasks:
+                        task = phase.tasks[drone_role]
+                        
+                        # --- MODIFIED: Pass mqtt and drone_id ---
+                        current_behavior = self.behavior_factory.create(
+                            task, 
+                            self.mission_state, 
+                            self.flight_controller,
+                            self.mqtt,
+                            self.mqtt._client_id # This is the drone_id
+                        )
+                        # --- End of MODIFIED ---
+                        await current_behavior.start()
+                    
+                    # 3. Check for transitions
+                    transitions = phase.transitions
+                    if not transitions:
+                        print(f"[MissionController] Phase '{current_phase_key}' has no transitions. Mission will end.")
+                        break # No transitions, exit loop
 
-                # 1. Clear the event from the last phase
-                self._trigger_event_fired.clear()
-                self._fired_trigger = None
+                    # 4. Clear the event from the last phase
+                    self._trigger_event_fired.clear()
+                    self._fired_trigger = None
+                    
+                    # 5. Set the valid triggers for this new phase
+                    async with self._event_lock:
+                        self._current_phase_triggers = set(transitions.keys())
+                    print(f"[MissionController] Phase '{current_phase_key}' started. Waiting for triggers: {self._current_phase_triggers}")
+                    
+                    # 6. Create tasks for phase-specific triggers (state, timeout)
+                    phase_specific_tasks = self._create_phase_listeners(transitions)
+                    
+                    # 7. We are now ready to accept new triggers
+                    self._is_transitioning = False
                 
-                # 2. Set the valid triggers for this new phase
-                async with self._event_lock:
-                    self._current_phase_triggers = set(transitions.keys())
-                print(f"[MissionController] Phase '{current_phase_key}' started. Waiting for triggers: {self._current_phase_triggers}")
+                # --- End of atomic transition section (lock released) ---
                 
-                # 3. Create tasks for phase-specific triggers (state, timeout)
-                phase_specific_tasks = self._create_phase_listeners(transitions)
-                
-                # 4. Wait for a trigger (global MQTT or phase-specific) OR shutdown
+                # 8. Wait for a trigger (global MQTT or phase-specific) OR shutdown
                 wait_tasks = [
                     asyncio.create_task(self._trigger_event_fired.wait(), name="wait_for_global_trigger"),
                     asyncio.create_task(self.mission_active_event.wait(), name="wait_for_shutdown")
@@ -134,49 +154,58 @@ class MissionController:
                     return_when=asyncio.FIRST_COMPLETED
                 )
                 
-                # 5. A trigger has fired or we are shutting down. Stop behavior.
-                if current_behavior:
-                    await current_behavior.stop()
-                    
-                # 6. Cancel all other pending listeners for this phase
-                for task in pending:
-                    task.cancel()
-                    
-                # 7. Check if shutdown was the trigger
-                if not self.mission_active_event.is_set():
-                    print("[MissionController] Shutdown event received, exiting mission loop.")
-                    break # Exit the main while loop
+                # --- NEW: Acquire lock to handle the fired trigger ---
+                async with self._transition_lock:
+                    self._is_transitioning = True # Block new triggers
                 
-                # 8. Get the trigger that fired
-                trigger = self._fired_trigger
-                if not trigger:
-                    # This could happen if a state/timeout task won the race
-                    # but hadn't set self._fired_trigger yet. Find it.
-                    for task in done:
-                        if task.name().startswith("state_") or task.name().startswith("timeout_"):
-                            trigger = await task # Get the result (trigger key)
-                            break
-                
-                if trigger:
-                    # We have a valid trigger, find the next phase
-                    next_phase_str = transitions[trigger][drone_role] # <-- MODIFIED
+                    # 9. A trigger has fired or we are shutting down. Stop behavior.
+                    if current_behavior:
+                        await current_behavior.stop()
+                        current_behavior = None
+                        
+                    # 10. Cancel all other pending listeners for this phase
+                    for task in pending:
+                        task.cancel()
+                        
+                    # 11. Check if shutdown was the trigger
+                    if not self.mission_active_event.is_set():
+                        print("[MissionController] Shutdown event received, exiting mission loop.")
+                        break # Exit the main while loop
                     
-                    # --- FIX for Bug #11 ---
-                    next_phase_key = next_phase_str.replace("goto:", "")
-                    if next_phase_key not in MISSION_PHASE_TO_ENUM:
-                        raise ValueError(f"Transition 'goto' phase '{next_phase_key}' is not a valid phase name.")
-                    next_phase_enum = MISSION_PHASE_TO_ENUM[next_phase_key]
-                    next_phase_name = next_phase_key # For logging
-                    # --- End of Fix ---
+                    # 12. Get the trigger that fired
+                    trigger = self._fired_trigger
+                    if not trigger:
+                        # This could happen if a state/timeout task won the race
+                        # but hadn't set self._fired_trigger yet. Find it.
+                        for task in done:
+                            if task.name().startswith("state_") or task.name().startswith("timeout_"):
+                                try:
+                                    trigger = await task # Get the result (trigger key)
+                                except asyncio.CancelledError:
+                                    continue # This task was cancelled, check others
+                                if trigger:
+                                    break
                     
-                    # FIX: Method is .transition(), not .transition_to()
-                    self.mission_state.transition(next_phase_enum)
-                else:
-                    # This should not be reachable if transitions exist
-                    print("[MissionController] No trigger found but loop ended. Aborting.")
-                    self.mission_state.transition(MissionStateEnum.ABORTED)
-                    break
-                # --- END OF REFACTORED LOGIC ---
+                    if trigger:
+                        # We have a valid trigger, find the next phase
+                        next_phase_str = transitions[trigger][drone_role] # <-- MODIFIED
+                        
+                        next_phase_key = next_phase_str.replace("goto:", "")
+                        if next_phase_key not in MISSION_PHASE_TO_ENUM:
+                            raise ValueError(f"Transition 'goto' phase '{next_phase_key}' is not a valid phase name.")
+                        next_phase_enum = MISSION_PHASE_TO_ENUM[next_phase_key]
+                        next_phase_name = next_phase_key # For logging
+                        
+                        self.mission_state.transition(next_phase_enum)
+                    else:
+                        # This should not be reachable if transitions exist
+                        print("[MissionController] No trigger found but loop ended. Aborting.")
+                        self.mission_state.transition(MissionStateEnum.ABORTED)
+                        break
+                    
+                    # 13. Mark transition as complete
+                    self._is_transitioning = False
+                # --- End of trigger handling lock ---
             
             if not self.mission_active_event.is_set():
                 print("[MissionController] Mission externally shut down. Aborting.")
@@ -185,7 +214,6 @@ class MissionController:
         except KeyError as e:
             print(f"[MissionController] CRITICAL ERROR: Phase mismatch or invalid key: {e}")
             print(f"  Check if '{current_phase_key}' or (if defined) '{next_phase_name}' exists in mission file and MissionStateEnum.")
-            # FIX: Method is .transition(), not .transition_to()
             self.mission_state.transition(MissionStateEnum.ABORTED)
         except asyncio.CancelledError:
             print("[MissionController] Execute mission loop cancelled.")
@@ -273,6 +301,12 @@ class MissionController:
         Central logic to check if a trigger is valid for the current phase
         and fire the main event if it is.
         """
+        # --- NEW: Check if we are already transitioning ---
+        if self._is_transitioning:
+            print(f"[MissionController] Discarding trigger '{trigger_key}' (transition in progress).")
+            return
+        # --- End of NEW ---
+        
         async with self._event_lock:
             if trigger_key in self._current_phase_triggers:
                 if not self._trigger_event_fired.is_set():

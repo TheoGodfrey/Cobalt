@@ -12,10 +12,13 @@ import logging
 import math  # <-- FIX 1.1: Added math for radian conversion
 import asyncio # <-- NEW: Added for async camera
 import cv2     # <-- NEW: Added for OpenCV
-from typing import Optional, Callable, Any # <-- NEW: Added Any
+from typing import Optional, Callable, Any, List # <-- NEW: Added Any & List
 from dronekit import connect, VehicleMode, LocationGlobalRelative, APIException
 from .hal import BaseFlightController
 from .sensors.cameras.base import BaseCamera
+from .sensors.lidar import Lidar, SimulatedLidar # <-- NEW
+from ..g3_capability_plugins.actuators.base import ActuatorHardware # <-- NEW
+from .hal_simulated import SimulatedActuator # <-- NEW
 from pymavlink import mavutil
 
 # --- FIX: Import the correct classes from vehicle_state.py ---
@@ -63,7 +66,7 @@ class ArduPilotCamera(BaseCamera):
             # VideoCapture is a blocking call, run in thread
             self._cap = await asyncio.to_thread(cv2.VideoCapture, self._stream_url)
             
-            if not self._cap.isOpened():
+            if not self._cap or not self._cap.isOpened():
                 log.error(f"[HAL-ArduPilot] Failed to open video stream: {self._stream_url}")
                 self._cap = None
                 self._is_streaming = False
@@ -144,6 +147,8 @@ class ArduPilotController(BaseFlightController):
         
         self.vehicle: Optional[connect] = None
         self._camera = ArduPilotCamera(self.camera_stream_url)
+        self._lidar = SimulatedLidar(0) # <-- NEW: Placeholder
+        self._actuator = SimulatedActuator() # <-- NEW: Placeholder
         
         # Internal state to prevent spamming listeners
         self._last_mode = None
@@ -186,6 +191,54 @@ class ArduPilotController(BaseFlightController):
         except Exception as e:
             log.error(f"[HAL-ArduPilot] Connection failed (Timeout or other error): {e}")
             return False
+
+    async def detect_hardware(self) -> List[str]:
+        """
+        Actively probes ArduPilot sensors.
+        """
+        detected_hardware = []
+        log.info("[HAL-ArduPilot] Detecting hardware...")
+        
+        if not self.vehicle:
+            log.error("[HAL-ArduPilot] Cannot detect hardware, vehicle not connected.")
+            return []
+            
+        # 1. Check for GPS
+        if self.vehicle.gps_0 and self.vehicle.gps_0.fix_type > 0:
+            log.info("[HAL-ArduPilot] GPS detected (fix_type > 0).")
+            detected_hardware.append("gps")
+        else:
+            log.warning("[HAL-ArduPilot] No GPS fix detected.")
+            
+        # 2. Check for Camera (by trying to get a frame)
+        log.info("[HAL-ArduPilot] Probing camera stream...")
+        try:
+            # We just need to know if it *can* start
+            await self._camera.start_streaming()
+            
+            if self._camera._is_streaming:
+                log.info("[HAL-ArduPilot] Camera stream connected.")
+                # We assume camera_0 is thermal as per config
+                detected_hardware.append("camera_thermal")
+                # We can stop streaming now, detectors will start it later
+                await self._camera.stop_streaming()
+            else:
+                 log.warning("[HAL-ArduPilot] Failed to connect to camera stream.")
+        except Exception as e:
+            log.error(f"[HAL-ArduPilot] Camera probe failed: {e}")
+
+        # 3. Check for configured actuators (e.g., from params)
+        # This is a proxy, as a generic dropper isn't "detectable"
+        if "dropper_mechanism" in self.config.get('hardware', []):
+             log.info("[HAL-ArduPilot] 'dropper_mechanism' is configured (assumed present).")
+             detected_hardware.append("dropper_mechanism")
+             
+        # 4. Check for Lidar (proxy)
+        if "lidar" in self.config.get('hardware', []):
+             log.info("[HAL-ArduPilot] 'lidar' is configured (assumed present).")
+             detected_hardware.append("lidar")
+
+        return list(set(detected_hardware))
 
     async def disconnect(self):
         """
@@ -327,6 +380,11 @@ class ArduPilotController(BaseFlightController):
         except Exception as e:
             log.error(f"[HAL-ArduPilot] Failed to set ROI: {e}")
 
+    async def stop_movement(self):
+        """Commands the vehicle to stop and loiter (BRAKE mode)."""
+        if self.vehicle:
+            log.warning("[HAL-ArduPilot] *** STOP MOVEMENT (BRAKE) ***")
+            self.vehicle.mode = VehicleMode("BRAKE")
 
     def get_telemetry(self) -> VehicleState:
         """
@@ -347,6 +405,14 @@ class ArduPilotController(BaseFlightController):
         if camera_id != 0:
             log.warning(f"[HAL-ArduPilot] Requested camera {camera_id}, but only camera 0 is supported. Returning camera 0.")
         return self._camera
+
+    def get_actuator_hardware(self, actuator_id: int) -> ActuatorHardware:
+        """Returns an instance of the actuator hardware."""
+        return self._actuator # Returning placeholder
+        
+    def get_lidar_sensor(self, sensor_id: int) -> Lidar:
+        """Returns an instance of the Lidar sensor."""
+        return self._lidar # Returning placeholder
 
     # --- Listener Callbacks (Private) ---
     # These methods are called by dronekit's background threads
@@ -407,6 +473,8 @@ class ArduPilotController(BaseFlightController):
                 mode = VehicleModeEnum.RTL
             elif mode_name == 'LAND':
                 mode = VehicleModeEnum.LAND
+            elif mode_name == 'BRAKE': # <-- NEW
+                mode = VehicleModeEnum.PAUSED # Map BRAKE to PAUSED
             elif self.vehicle.armed:
                 mode = VehicleModeEnum.ARMED
             else:

@@ -8,10 +8,12 @@ and issues commands based on the master mission plan.
 """
 
 import asyncio
+import os
+from pathlib import Path
 # FIX for Bug #10: Import asdict
 from dataclasses import dataclass, field, asdict
 from time import time
-from typing import Dict, Any, Optional, Set
+from typing import Dict, Any, Optional, Set, List
 
 # We need the communication layer
 from drone.core.cross_cutting.communication import MqttClient
@@ -48,39 +50,56 @@ class FleetCoordinator:
         self.current_mission: Optional[MissionFlow] = None
         self.active_detections: Dict[str, Any] = {}
         self.confirmed_target: Optional[Dict[str, Any]] = None
-        print("[FleetCoordinator] Initialized.")
+        
+        # --- NEW: Define a safe, absolute path for the missions directory ---
+        # Assumes the hub is run from the project's root directory
+        self.missions_dir = Path("missions").resolve()
+        print(f"[FleetCoordinator] Initialized. Mission directory set to: {self.missions_dir}")
     # --- End of FIX 3.2 ---
 
     # --- FIX 3.2: Modified to populate role on first contact ---
     async def _handle_telemetry(self, topic: str, payload: Dict[str, Any]): # <-- MODIFIED
         """Callback for processing telemetry messages."""
         try:
-            drone_id = payload['drone_id']
-            if drone_id not in self.fleet_state:
+            drone_id = payload['drone_id'] # <-- MODIFIED
+            reported_state = payload['mission_state'] # <-- Get reported state
+            
+            is_new_drone = drone_id not in self.fleet_state
+            
+            if is_new_drone:
                 # Get role from config, default to 'unknown'
                 role = self.fleet_config.get(drone_id, {}).get('role', 'unknown')
                 self.fleet_state[drone_id] = DroneState(drone_id=drone_id, role=role)
                 print(f"[FleetCoordinator] New drone connected: {drone_id} (Role: {role})")
 
+            # Update the drone's state in our fleet list
             state = self.fleet_state[drone_id]
-            state.last_telemetry = payload['telemetry']
-            state.mission_state = payload['mission_state']
+            state.last_telemetry = payload['telemetry'] # <-- MODIFIED
+            state.mission_state = reported_state
             state.last_heartbeat = time.monotonic()
+            
+            # --- NEW: Race condition fix ---
+            # If a mission is loaded and this drone is IDLE,
+            # assign it the starting phase.
+            if self.current_mission and reported_state == "IDLE":
+                print(f"[FleetCoordinator] Drone {drone_id} is IDLE. Assigning start phase: {self.current_mission.start_phase}")
+                await self.assign_phase(self.current_mission.start_phase, drone_id)
+            # --- End of NEW ---
             
             # print(f"[FleetCoordinator] Telemetry from {drone_id}: {state.mission_state}")
         except KeyError as e:
             print(f"[FleetCoordinator] Malformed telemetry message: {e}")
     # --- End of FIX 3.2 ---
 
-    async def _handle_detections(self, topic: str, payload: Dict[str, Any]):
+    async def _handle_detections(self, topic: str, payload: Dict[str, Any]): # <-- MODIFIED
         """
         Handles incoming detections. Implements Hub-Mediated Consensus.
         (From Spec Appendix A.2)
         """
         try:
             # ... existing _handle_detections logic ...
-            drone_id = payload['drone_id']
-            detection = payload['detection']
+            drone_id = payload['drone_id'] # <-- MODIFIED
+            detection = payload['detection'] # <-- MODIFIED
             detection_id = detection['track_id']
             
             print(f"[FleetCoordinator] Received detection {detection_id} from {drone_id}")
@@ -94,7 +113,7 @@ class FleetCoordinator:
                 self.confirmed_target = detection
                 
                 # Broadcast the confirmed target to all drones
-                if self.comms.is_connected():
+                if self.comms.is_connected(): # <-- ADD THIS CHECK
                     await self.comms.publish("fleet/target_confirmed", {
                         "position": self.confirmed_target['position'],
                         "confidence": 1.0,
@@ -102,7 +121,8 @@ class FleetCoordinator:
                     })
                 
                 # Tell drones to switch to delivery phase (simplified)
-                await self.assign_phase("delivery")
+                # --- NEW: Call assign_phase for *all* drones ---
+                await self.assign_phase("delivery") # No drone_id means "all"
 
         except KeyError as e:
             print(f"[FleetCoordinator] Malformed detection message: {e}")
@@ -127,33 +147,55 @@ class FleetCoordinator:
         # Subscribe to drone disconnections (Bug #13)
         asyncio.create_task(self.comms.subscribe_lwt(self._handle_drone_lwt))
 
-    async def load_and_start_mission(self, mission_file_path: str):
+    async def load_and_start_mission(self, mission_filename: str):
         """Loads a mission JSON and commands drones to start."""
-        print(f"[FleetCoordinator] Loading mission: {mission_file_path}")
+        print(f"[FleetCoordinator] Received request to load mission: {mission_filename}")
         try:
-            # --- FIX 3.2: This assumes 'drone.core.g1_mission_definition.loader'
-            # is in the python path. It might be better to load from a path
-            # relative to the hub. For now, assuming it works.
+            # --- NEW: Path Traversal Security Fix ---
+            if not mission_filename or ".." in mission_filename:
+                raise ValueError("Invalid mission filename.")
+                
+            # Resolve the *absolute* path of the requested mission
+            mission_path = (self.missions_dir / mission_filename).resolve()
+            
+            # Check that the resolved path is still *inside* the missions_dir
+            # This prevents path traversal attacks like "../config/system_config.yaml"
+            if self.missions_dir not in mission_path.parents:
+                raise SecurityException(
+                    f"Path Traversal Denied: {mission_filename} resolves outside missions directory."
+                )
+            if not mission_path.is_file():
+                raise FileNotFoundError(f"Mission file not found at {mission_path}")
+            # --- End of Security Fix ---
+
             from drone.core.g1_mission_definition.loader import load_mission_file
             from drone.core.g1_mission_definition.parser import parse_mission_flow
             
-            # This is a risky path, it should be relative to a known 'missions' dir.
-            # See P0 fix for Path Traversal, which should be applied here too.
-            mission_dict = load_mission_file(mission_file_path)
+            # --- MODIFIED: Load from the secured path ---
+            mission_dict = load_mission_file(mission_path) 
             self.current_mission = parse_mission_flow(mission_dict)
-        except Exception as e:
+            
+        except (ValueError, FileNotFoundError, SecurityException) as e:
             print(f"[FleetCoordinator] FAILED to load mission: {e}")
+            return
+        except Exception as e:
+            print(f"[FleetCoordinator] FAILED to load mission (unexpected error): {e}")
             return
 
         print(f"[FleetCoordinator] Mission '{self.current_mission.mission_id}' loaded.")
+        print(f"[FleetCoordinator] Hub is now WAITING for drones to connect and report IDLE.")
         
-        # Tell drones to start the first phase
-        await self.assign_phase(self.current_mission.start_phase)
+        # --- REMOVED: Do not assign phase here. Wait for drones. ---
+        # await self.assign_phase(self.current_mission.start_phase)
 
     # --- FIX 3.2: Incorrect Role-Based Task Assignment ---
     # This function now assigns tasks based on the drone's role.
-    async def assign_phase(self, phase_name: str):
-        """Commands all drones to execute a specific phase."""
+    async def assign_phase(self, phase_name: str, target_drone_id: Optional[str] = None):
+        """
+        Commands drones to execute a specific phase.
+        If target_drone_id is specified, only commands that drone.
+        Otherwise, commands all connected drones.
+        """
         if not self.current_mission:
             print("[FleetCoordinator] No mission loaded, cannot assign phase.")
             return
@@ -163,12 +205,25 @@ class FleetCoordinator:
             print(f"[FleetCoordinator] Unknown phase '{phase_name}'")
             return
             
-        print(f"[FleetCoordinator] Assigning phase '{phase_name}' to fleet.")
+        # --- NEW: Determine which drones to command ---
+        drones_to_command: List[DroneState] = []
+        if target_drone_id:
+            if target_drone_id in self.fleet_state:
+                drones_to_command = [self.fleet_state[target_drone_id]]
+            else:
+                print(f"[FleetCoordinator] Cannot assign phase: Target drone {target_drone_id} not in fleet state.")
+                return
+        else:
+            drones_to_command = list(self.fleet_state.values())
+        # --- End of NEW ---
+            
+        print(f"[FleetCoordinator] Assigning phase '{phase_name}' to {len(drones_to_command)} drone(s).")
         
         # This is the "orchestration" step
         # It now assigns tasks based on role.
-        for drone_id, drone_state in self.fleet_state.items():
-            # 1. Get the drone's role
+        for drone_state in drones_to_command: # <-- MODIFIED
+            # 1. Get the drone's info
+            drone_id = drone_state.drone_id
             drone_role = drone_state.role
             
             # 2. Look up the correct task for that role
@@ -182,7 +237,7 @@ class FleetCoordinator:
                     "phase": phase_name,
                     "task": asdict(task) # Send task config
                 }
-                if self.comms.is_connected():
+                if self.comms.is_connected(): # <-- ADD THIS CHECK
                     await self.comms.publish(f"fleet/commands/{drone_id}", command)
             else:
                 # No task defined for this role in this phase (e.g., "payload" drone during "scout" phase)
@@ -194,7 +249,8 @@ class FleetCoordinator:
                     "phase": phase_name,
                     "task": {"action": "IGNORE"} 
                 }
-                await self.comms.publish(f"fleet/commands/{drone_id}", command)
+                if self.comms.is_connected(): # <-- ADD THIS CHECK
+                    await self.comms.publish(f"fleet/commands/{drone_id}", command)
     # --- End of FIX 3.2 ---
 
 
@@ -211,3 +267,7 @@ class FleetCoordinator:
         }
     # --- End of FIX 1.4 ---
 
+# --- NEW: Custom Security Exception ---
+class SecurityException(Exception):
+    """Custom exception for security violations like path traversal."""
+    pass

@@ -19,10 +19,12 @@ from core.g2_execution_core.mission_controller import MissionController
 
 # Bug #2 fix: Factory functions exist
 from core.g3_capability_plugins import get_detector, get_strategy, get_actuator
+from core.g3_capability_plugins.detectors.obstacle_detector import ObstacleDetector # <-- NEW
 
 # Bug #3 fix: get_flight_controller factory exists
 from core.g4_platform_interface.hal import get_flight_controller
 from core.g4_platform_interface.vehicle_state import VehicleState
+from core.g4_platform_interface.sensors.lidar import Lidar # <-- NEW
 
 from core.cross_cutting.communication import MqttClient
 from core.cross_cutting.safety_monitor import SafetyMonitor
@@ -85,8 +87,19 @@ async def main():
         logger.log(f"Loading fleet config from {fleet_config_path}...", "info")
         fleet_config_data = load_config(str(fleet_config_path)) # This will be a dict, e.g., {"fleet": {...}}
 
-        # Merge them. The fleet data is top-priority.
-        config = {**system_config, **fleet_config_data}
+        # --- NEW: Load separate safety config ---
+        # Assumes main.py is run from the project root (where /config and /drone are)
+        safety_config_path = "drone/config/safety_config.yaml"
+        if not Path(safety_config_path).exists():
+            logger.log(f"WARNING: {safety_config_path} not found. Safety monitor may not be configured.", "warning")
+            safety_config_data = {}
+        else:
+            logger.log(f"Loading safety config from {safety_config_path}...", "info")
+            safety_config_data = load_config(safety_config_path)
+        # --- End of NEW ---
+
+        # Merge them. The fleet and safety data is top-priority.
+        config = {**system_config, **fleet_config_data, **safety_config_data}
         # --- END OF NEW LOADING LOGIC ---
         
         # --- NEW: Get role from fleet_config as single source of truth ---
@@ -112,18 +125,6 @@ async def main():
         mission_flow = parse_mission_flow(mission_data, valid_roles) # <-- MODIFIED
         logger.log(f"Mission '{mission_flow.mission_id}' loaded successfully", "info")
         
-        # --- NEW: Hardware-Aware Refactor ---
-        # Look up this drone's specific config from the fleet
-        
-        # Extract the hardware list.
-        hardware_list = drone_config.get('hardware', [])
-        if not hardware_list:
-            logger.log(f"No 'hardware' list found for '{args.id}' in config. "
-                         f"Hardware validation may fail.", "warning")
-        else:
-            logger.log(f"Found hardware: {hardware_list}", "info")
-        # --- End of NEW ---
-        
         # --- NEW: Create shared shutdown event ---
         mission_active_event = asyncio.Event()
         mission_active_event.set() # Start in the "running" state
@@ -137,6 +138,12 @@ async def main():
         logger.log("Connecting to hardware...", "info")
         await flight_controller.connect()
         logger.log("Hardware connection established", "info")
+        
+        # --- NEW: Detect ACTUAL hardware ---
+        logger.log("Detecting actual hardware...", "info")
+        actual_hardware = await flight_controller.detect_hardware()
+        logger.log(f"Actual hardware detected: {actual_hardware}", "info")
+        # --- End of NEW ---
         
         # 3. Create communication
         mqtt_config = {
@@ -153,6 +160,21 @@ async def main():
         
         # --- FIX 1.2: Re-ordered initialization ---
         
+        # --- NEW: Create standalone plugins for SafetyMonitor ---
+        obstacle_detector = None
+        if "lidar" in actual_hardware:
+            try:
+                lidar_sensor = flight_controller.get_lidar_sensor(0)
+                await lidar_sensor.start() # Start the sensor
+                obstacle_config = config.get('detectors', {}).get('obstacle_detector', {})
+                obstacle_detector = ObstacleDetector(lidar_sensor, obstacle_config)
+                logger.log("Obstacle detector initialized.", "info")
+            except Exception as e:
+                logger.log(f"Failed to initialize ObstacleDetector: {e}", "error")
+        else:
+            logger.log("No 'lidar' in detected hardware. Obstacle detector disabled.", "warning")
+        # --- End of NEW ---
+        
         # 5. Create mission controller FIRST (so mission_state exists)
         logger.log("Initializing mission controller...", "info")
         controller = MissionController(
@@ -162,7 +184,7 @@ async def main():
             mqtt=mqtt,
             safety_monitor=None,  # Pass None for now
             config=config,
-            hardware_list=hardware_list,
+            hardware_list=actual_hardware,  # <-- MODIFIED: Pass actual hardware
             drone_role=drone_role,
             mission_active_event=mission_active_event # <-- Pass event
         )
@@ -175,7 +197,9 @@ async def main():
             mqtt=mqtt,
             mission_state=controller.mission_state,  # <-- Pass the *existing* instance
             vehicle_state=vehicle_state,
-            mission_active_event=mission_active_event # <-- Pass event
+            mission_active_event=mission_active_event, # <-- Pass event
+            flight_controller=flight_controller, # <-- NEW
+            obstacle_detector=obstacle_detector  # <-- NEW (will be None if disabled)
         )
         
         # Now, link the safety_monitor back to the controller
@@ -228,6 +252,8 @@ async def main():
                 await mqtt.disconnect()
             if 'flight_controller' in locals():
                 await flight_controller.disarm()
+            if 'lidar_sensor' in locals() and lidar_sensor: # <-- NEW
+                await lidar_sensor.stop()
             logger.log("Shutdown complete", "info")
             print(f"\n[Main] Logs saved to: {logger.get_log_path()}")
         except Exception as e:

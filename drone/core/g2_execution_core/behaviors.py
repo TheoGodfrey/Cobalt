@@ -11,6 +11,7 @@ REFACTOR: Added hardware_list dependency injection.
 """
 
 import asyncio
+import time # <-- NEW
 from abc import ABC, abstractmethod
 from typing import Protocol, Optional, Any, Dict, List # NEW: Added List
 
@@ -19,6 +20,7 @@ from .mission_state import MissionState, MissionStateEnum
 from ..g1_mission_definition.phase import Task
 from ..g3_capability_plugins.detectors.base import Detection
 from ..g3_capability_plugins.strategies.base import Waypoint
+from ..cross_cutting.communication import MqttClient # <-- NEW
 
 # FIX for Bug #6: Import the factory functions from Bug #2
 from ..g3_capability_plugins import get_detector, get_strategy, get_actuator
@@ -68,18 +70,23 @@ class BaseBehavior(ABC):
     def __init__(self,
                  mission_state: MissionState,
                  hal: HAL,
-                 dependencies: Dict[str, Any]):
+                 dependencies: Dict[str, Any],
+                 mqtt: MqttClient,    # <-- NEW
+                 drone_id: str):      # <-- NEW
         """
         Initialize the behavior with its required dependencies.
         
         Args:
             mission_state: The shared MissionState object.
             hal: The Hardware Abstraction Layer.
-            dependencies: A dictionary of required plugins, e.g.,
-                          {"detector": ThermalDetector(), "strategy": ProbSearch()}
+            dependencies: A dictionary of required plugins.
+            mqtt: The MqttClient for communication.
+            drone_id: The drone's unique ID.
         """
         self.mission_state = mission_state
         self.hal = hal
+        self.mqtt = mqtt      # <-- NEW
+        self.drone_id = drone_id  # <-- NEW
         self._running = False
         self._task: Optional[asyncio.Task] = None
         
@@ -88,8 +95,11 @@ class BaseBehavior(ABC):
         self.strategy: Optional[Strategy] = dependencies.get("strategy")
         self.actuator: Optional[Actuator] = dependencies.get("actuator")
 
+        # --- NEW: Failure tracking (Corrected) ---
         self.MAX_CONSECUTIVE_FAILURES = 3 # Max retries
+        # Use a dictionary to track failures by type
         self._failure_counts: Dict[str, int] = {}
+        # --- End of NEW ---
 
     async def start(self):
         """Starts the behavior's run loop as an async task."""
@@ -114,13 +124,13 @@ class BaseBehavior(ABC):
         self._task = None
         print(f"[{self.__class__.__name__}] Stopped.")
 
-    def _reset_failures(self, failure_type: str = "navigation"):
-        """Resets the consecutive failure count."""
+    # --- NEW: Failure handling methods (Corrected) ---
+    def _reset_failures(self, failure_type: str):
+        """Resets the consecutive failure count for a specific type."""
         if self._failure_counts.get(failure_type, 0) > 0:
             print(f"[{self.__class__.__name__}] Action '{failure_type}' successful, "
                   f"resetting failure count.")
             self._failure_counts[failure_type] = 0
-            
 
     def _increment_failure(self, failure_type: str = "unknown"):
         """Increments failure count for a type and triggers failure state if threshold is met."""
@@ -144,6 +154,7 @@ class BaseBehavior(ABC):
                 # Fallback to a general abort if type is unknown
                 print(f"[{self.__class__.__name__}] Unknown failure type '{failure_type}', ABORTING.")
                 self.mission_state.transition(MissionStateEnum.ABORTED)
+    # --- End of NEW ---
 
     @abstractmethod
     async def run(self):
@@ -184,17 +195,47 @@ class SearchBehavior(BaseBehavior):
                 arrival_success = await self.hal.goto(waypoint)
                 if not arrival_success:
                     print(f"[SearchBehavior] Failed to reach waypoint.")
+                    # Implement retry logic or abort
                     self._increment_failure("navigation") 
                     continue
                 
-                self._reset_failures("navigation") # <-- SPECIFY "navigation" # Reset on successful goto
+                self._reset_failures("navigation") # <-- SPECIFY "navigation"
 
                 # 4. At waypoint, use the injected Detector to look for target
                 print(f"[SearchBehavior] At waypoint, scanning for target...")
                 detection = await self.detector.detect()
                 
-                if detection and detection.confidence > 0.9:
+                # --- THIS IS THE FIX ---
+                if detection: # This safely handles None
+                # --- END OF FIX ---
                     print(f"[SearchBehavior] *** Target Found! *** at {detection.position}")
+                    
+                    # --- NEW: Publish detection to Hub ---
+                    try:
+                        # Create a simple track_id if one isn't provided
+                        track_id = detection.track_id or f"trk_{int(detection.timestamp)}"
+                        
+                        payload = {
+                            "drone_id": self.drone_id,
+                            "detection": {
+                                "class_label": detection.class_label,
+                                "confidence": detection.confidence,
+                                "position": detection.position, # (pixel_x, pixel_y)
+                                "timestamp": detection.timestamp,
+                                "track_id": track_id
+                            }
+                        }
+                        
+                        if self.mqtt.is_connected():
+                            await self.mqtt.publish(
+                                f"fleet/detections/{self.drone_id}", 
+                                payload
+                            )
+                        print(f"[SearchBehavior] Published detection {track_id} to hub.")
+                    except Exception as e:
+                        print(f"[SearchBehavior] WARNING: Failed to publish detection: {e}")
+                    # --- End of NEW ---
+                    
                     # Transition mission state to CONFIRMING or DELIVERING
                     # This trigger will be caught by the MissionController
                     self.mission_state.transition(MissionStateEnum.CONFIRMING)
@@ -241,9 +282,10 @@ class DeliveryBehavior(BaseBehavior):
                 arrival_success = await self.hal.goto(drop_waypoint)
                 if not arrival_success:
                     print(f"[DeliveryBehavior] Failed to reach drop point.")
+                    self._increment_failure("navigation") 
                     continue
-
-                self._reset_failures()  # Reset on successful goto
+                
+                self._reset_failures("navigation") # <-- SPECIFY "navigation"
 
                 # 4. At drop point, command the injected Actuator to execute
                 print(f"[DeliveryBehavior] At drop point, executing payload release...")
@@ -257,7 +299,7 @@ class DeliveryBehavior(BaseBehavior):
                 else:
                     print(f"[DeliveryBehavior] Payload release failed!")
                     # Implement retry logic or abort
-                    self._increment_failure("actuator")
+                    self._increment_failure("actuator") 
                 
                 break # Delivery is usually a one-shot action
         except asyncio.CancelledError:
@@ -285,9 +327,15 @@ class RTHBehavior(BaseBehavior):
             home_waypoint = await self.strategy.next_waypoint()
             print(f"[RTHBehavior] Returning to Hub at: ({home_waypoint.x}, {home_waypoint.y}, {home_waypoint.z})")
             
-            await self.hal.goto(home_waypoint)
+            arrival_success = await self.hal.goto(home_waypoint) # <-- MODIFIED
+            if not arrival_success:
+                print("[RTHBehavior] Failed to reach home waypoint. Attempting failsafe land.")
+                self._increment_failure("navigation") # Log the failure
+                # Don't loop, just land
+            else:
+                self._reset_failures("navigation")
             
-            print("[RTHBehavior] Arrived at Hub. Now landing...")
+            print("[RTHBehavior] Arrived at Hub (or failed). Now landing...")
             
             # --- FIX: Actually call the land function ---
             await self.hal.land()
@@ -329,7 +377,7 @@ class BehaviorFactory:
         """
         self.config = config
         self.hardware_list = hardware_list # NEW: Store hardware list
-        print(f"[BehaviorFactory] Initialized with hardware: {self.hardware_list}")
+        print(f"[BehaviorFactory] Initialized with actual hardware: {self.hardware_list}")
 
     # NEW: Pass hardware_list to this method
     def _get_plugins(self, task: Task, hal: HAL, hardware_list: List[str]) -> Dict[str, Any]:
@@ -342,7 +390,7 @@ class BehaviorFactory:
         Args:
             task: The Task definition from the mission JSON
             hal: The Hardware Abstraction Layer providing hardware interfaces
-            hardware_list: The list of available hardware strings
+            hardware_list: The list of *actual* available hardware strings
             
         Returns:
             A dictionary of instantiated plugins: {"detector": ..., "strategy": ..., "actuator": ...}
@@ -375,6 +423,7 @@ class BehaviorFactory:
                 print(f"[BehaviorFactory] ✗ ERROR: Unknown detector type '{task.detector}': {e}")
             except Exception as e:
                 print(f"[BehaviorFactory] ✗ ERROR: Failed to load detector '{task.detector}': {e}")
+                print(f"  (This may be a hardware validation failure from the plugin factory)")
         
         # --- Strategy Loading ---
         if task.strategy:
@@ -402,6 +451,7 @@ class BehaviorFactory:
                 print(f"[BehaviorFactory] ✗ ERROR: Unknown strategy type '{task.strategy}': {e}")
             except Exception as e:
                 print(f"[BehaviorFactory] ✗ ERROR: Failed to load strategy '{task.strategy}': {e}")
+                print(f"  (This may be a hardware validation failure from the plugin factory)")
         
         # --- Actuator Loading ---
         if task.actuator:
@@ -429,6 +479,7 @@ class BehaviorFactory:
                 print(f"[BehaviorFactory] ✗ ERROR: Unknown actuator type '{task.actuator}': {e}")
             except Exception as e:
                 print(f"[BehaviorFactory] ✗ ERROR: Failed to load actuator '{task.actuator}': {e}")
+                print(f"  (This may be a hardware validation failure from the plugin factory)")
         
         return dependencies
     
@@ -474,7 +525,9 @@ class BehaviorFactory:
     def create(self, 
                  task: Task, 
                  mission_state: MissionState, 
-                 hal: HAL) -> BaseBehavior:
+                 hal: HAL,
+                 mqtt: MqttClient,    # <-- NEW
+                 drone_id: str) -> BaseBehavior: # <-- NEW
         """
         Factory method to create a behavior instance.
         
@@ -485,12 +538,14 @@ class BehaviorFactory:
             task: The Task definition from the mission JSON
             mission_state: The shared MissionState object
             hal: The Hardware Abstraction Layer
+            mqtt: The MqttClient instance
+            drone_id: The drone's unique ID
             
         Returns:
             An instance of a BaseBehavior subclass
             
         Raises:
-            ValueError: If the task action is not recognized
+            ValueError: If the task action is not recognized or plugins are missing
         """
         
         print(f"[BehaviorFactory] Creating behavior for action: {task.action}")
@@ -506,13 +561,13 @@ class BehaviorFactory:
         action = task.action.upper()
         
         if action == "EXECUTE_SEARCH":
-            return SearchBehavior(mission_state, hal, dependencies)
+            return SearchBehavior(mission_state, hal, dependencies, mqtt, drone_id) # <-- MODIFIED
             
         elif action == "EXECUTE_DELIVERY":
-            return DeliveryBehavior(mission_state, hal, dependencies)
+            return DeliveryBehavior(mission_state, hal, dependencies, mqtt, drone_id) # <-- MODIFIED
             
         elif action == "EXECUTE_RTH":
-            return RTHBehavior(mission_state, hal, dependencies)
+            return RTHBehavior(mission_state, hal, dependencies, mqtt, drone_id) # <-- MODIFIED
         
         # ... add other behaviors here ...
         
@@ -520,7 +575,9 @@ class BehaviorFactory:
             # FIX: Add a default behavior for IGNORE
             if action == "IGNORE":
                 # Return a dummy behavior that does nothing
-                return RTHBehavior(mission_state, hal, {}) # HACK: Should be a real NoOpBehavior
+                # We can re-use RTHBehavior with an empty dependency dict,
+                # as it will just sit there (or use a dedicated NoOpBehavior)
+                return RTHBehavior(mission_state, hal, {}, mqtt, drone_id) # <-- MODIFIED
             
             raise ValueError(f"Unknown behavior action: {task.action}")
     
@@ -528,8 +585,7 @@ class BehaviorFactory:
         """
         Validates that all required plugins for a task were successfully loaded.
         
-        Logs warnings for missing plugins but doesn't raise errors, allowing
-        behaviors to fail gracefully during execution.
+        Raises a ValueError if a required plugin is missing.
         
         Args:
             task: The Task definition
@@ -547,8 +603,10 @@ class BehaviorFactory:
         if action in requirements:
             for required in requirements[action]:
                 if required not in dependencies or dependencies[required] is None:
-                    # This check is now superseded by the factory's hardware check,
-                    # but we leave it as a fallback.
-                    print(f"[BehaviorFactory] ⚠ WARNING: Required plugin '{required}' not loaded for action '{action}'")
-                    print(f"[BehaviorFactory]   The behavior may fail during execution.")
-
+                    # --- MODIFIED: Raise error instead of printing ---
+                    error_msg = (f"Missing required plugin: '{required}' is "
+                                 f"needed for action '{action}' but was not loaded. "
+                                 f"(Check hardware validation in main.py)")
+                    print(f"[BehaviorFactory] ✗ ERROR: {error_msg}")
+                    raise ValueError(error_msg)
+                    # --- End of MODIFIED ---

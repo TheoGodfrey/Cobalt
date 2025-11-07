@@ -13,7 +13,7 @@ It owns and manages:
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 # Import component 10
 from .vehicle_state import VehicleState
@@ -21,6 +21,7 @@ from .vehicle_state import VehicleState
 # Import protocols (interfaces) from G3/G4
 from ..g3_capability_plugins.strategies.base import Waypoint
 from .sensors.cameras.base import BaseCamera
+from .sensors.lidar import Lidar # <-- NEW
 from ..g3_capability_plugins.actuators.base import ActuatorHardware
 
 # --- HAL Base Class ---
@@ -79,6 +80,27 @@ class BaseFlightController(ABC):
     @abstractmethod
     def get_actuator_hardware(self, actuator_id: int) -> ActuatorHardware:
         """Get an interface to an actuator."""
+        pass
+        
+    @abstractmethod
+    async def detect_hardware(self) -> List[str]:
+        """
+        Actively probes sensors and returns a list of detected hardware.
+        e.g., ["gps", "camera_thermal", "dropper_mechanism"]
+        """
+        pass
+        
+    @abstractmethod
+    def get_lidar_sensor(self, sensor_id: int) -> Lidar:
+        """Get an interface to a Lidar sensor."""
+        pass
+        
+    @abstractmethod
+    async def stop_movement(self):
+        """
+        Commands the vehicle to an immediate stop (e.g., brake, loiter).
+        This is a safety-critical action.
+        """
         pass
 
 
@@ -143,6 +165,8 @@ def get_flight_controller(config: Dict[str, Any], drone_id: str) -> BaseFlightCo
     hal_config = {
         'drone_id': drone_id,
         'role': drone_config.get('role', 'unknown'),
+        # --- NEW: Inject the configured hardware list for simulated HALs ---
+        'hardware': drone_config.get('hardware', [])
     }
     
     # Add network configuration if available

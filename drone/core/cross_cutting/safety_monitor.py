@@ -4,11 +4,14 @@ Cross-cutting observer that watches all components
 """
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import List, Optional, Dict, Any
 
 # FIX: Import the state classes needed for type hinting and access
-from ..g2_execution_core.mission_state import MissionState
+from ..g2_execution_core.mission_state import MissionState, MissionStateEnum
 from ..g4_platform_interface.vehicle_state import VehicleState
+from ..g4_platform_interface.hal import BaseFlightController
+from ..g3_capability_plugins.detectors.obstacle_detector import ObstacleDetector
+
 
 # --- FIX: Define a common interface for all safety checkers ---
 class BaseSafetyCheck(ABC):
@@ -38,28 +41,50 @@ class SafetyMonitor:
     
     # FIX: Update __init__ to accept state objects
     def __init__(self, config: dict, mqtt, mission_state: MissionState, 
-                 vehicle_state: VehicleState, mission_active_event: asyncio.Event): # <-- MODIFIED
+                 vehicle_state: VehicleState, mission_active_event: asyncio.Event,
+                 flight_controller: BaseFlightController, # <-- NEW
+                 obstacle_detector: ObstacleDetector):    # <-- NEW
         self.config = config
         self.mqtt = mqtt
         self.mission_state = mission_state
         self.vehicle_state = vehicle_state
-        self.mission_active_event = mission_active_event # <-- ADDED
+        self.mission_active_event = mission_active_event
+        self.hal = flight_controller # <-- NEW
         self.violations = []
         
         # Checkers now follow the BaseSafetyCheck interface
-        self.checkers = [
+        self.checkers: List[BaseSafetyCheck] = [
             # BatteryChecker(config.get('battery')),
             # GeofenceChecker(config.get('geofence')),
             StateConflictChecker(),
-            # CollisionChecker()
         ]
+        
+        # --- NEW: Add ObstacleCheck if enabled ---
+        obstacle_config = self.config.get('obstacle_check', {})
+        if obstacle_config.get('enabled', False):
+            print("[SafetyMonitor] Obstacle check enabled.")
+            self.checkers.append(ObstacleCheck(obstacle_detector, obstacle_config))
+        # --- End of NEW ---
     
     async def monitor_loop(self):
         """Continuous safety monitoring"""
         print("[SafetyMonitor] Monitor loop started.")
         while self.mission_active_event.is_set(): # <-- MODIFIED
             try:
+                # Don't check for obstacles if we're not moving
+                active_modes = (
+                    MissionStateEnum.SEARCHING, 
+                    MissionStateEnum.DELIVERING, 
+                    MissionStateEnum.RETURNING, 
+                    MissionStateEnum.CONFIRMING
+                )
+                
                 for checker in self.checkers:
+                    # --- NEW: Skip obstacle check if not active ---
+                    if isinstance(checker, ObstacleCheck) and self.mission_state.current not in active_modes:
+                        continue
+                    # --- End of NEW ---
+                
                     # FIX: Pass the state objects to the checker
                     violation = await checker.check(self.mission_state, self.vehicle_state)
                     if violation:
@@ -88,14 +113,20 @@ class SafetyMonitor:
         """Execute safety action based on violation data"""
         print(f"[SafetyMonitor] VIOLATION DETECTED: {violation.get('message')}")
         
-        severity = violation.get("severity", "HIGH")
+        action = violation.get("action", "LOG_WARNING")
         
-        if severity == "CRITICAL":
-            # await self.trigger_emergency_land()
-            print("[SafetyMonitor] CRITICAL: Triggering Emergency Land (Simulated)")
-        elif severity == "HIGH":
-            # await self.trigger_rth()
-            print("[SafetyMonitor] HIGH: Triggering RTH (Simulated)")
+        # --- NEW: Handle STOP_MOVEMENT action ---
+        if action == "STOP_MOVEMENT":
+            print("[SafetyMonitor] CRITICAL: Obstacle detected! Stopping movement and pausing mission.")
+            await self.hal.stop_movement()
+            self.mission_state.pause()
+        # --- End of NEW ---
+        elif action == "EMERGENCY_RTH":
+            print("[SafetyMonitor] HIGH: Triggering RTH.")
+            self.mission_state.transition(MissionStateEnum.EMERGENCY_RTH)
+        elif action == "HOLD_POSITION":
+            print("[SafetyMonitor] WARNING: Holding position.")
+            self.mission_state.pause()
         
         if self.mqtt.is_connected(): # <-- ADD THIS CHECK
             await self.mqtt.publish("fleet/safety/violation", violation)
@@ -120,18 +151,34 @@ class StateConflictChecker(BaseSafetyCheck):
             return {
                 "type": "STATE_CONFLICT",
                 "message": f"Low battery ({battery_level}%) during DELIVERING phase",
-                "severity": "HIGH"
+                "severity": "HIGH",
+                "action": "EMERGENCY_RTH" # Be specific
             }
         
         return None
+        
+# --- NEW: ObstacleCheck Implementation ---
 
-# Placeholder for other checkers (to show the pattern)
-# class BatteryChecker(BaseSafetyCheck):
-#     async def check(self, mission_state: MissionState, vehicle_state: VehicleState) -> Optional[dict]:
-#         if vehicle_state.battery_percent < self.config.get("critical_threshold", 15):
-#             return {
-#                 "type": "LOW_BATTERY_CRITICAL",
-#                 "message": f"Battery critically low: {vehicle_state.battery_percent}%",
-#                 "severity": "CRITICAL"
-#             }
-#         return None
+class ObstacleCheck(BaseSafetyCheck):
+    """Checks for obstacles using a distance sensor."""
+    
+    def __init__(self, obstacle_detector: ObstacleDetector, config: Optional[dict] = None):
+        super().__init__(config)
+        self.detector = obstacle_detector
+        self.min_distance = self.config.get("min_distance_m", 2.0)
+        self.action = self.config.get("action", "STOP_MOVEMENT")
+
+    async def check(self, mission_state: MissionState, vehicle_state: VehicleState) -> Optional[dict]:
+        """Checks for obstacles."""
+        
+        distance = await self.detector.detect()
+        
+        if distance < self.min_distance:
+            return {
+                "type": "OBSTACLE_DETECTED",
+                "message": f"Obstacle detected at {distance:.2f}m (min: {self.min_distance}m)",
+                "severity": "CRITICAL",
+                "action": self.action
+            }
+            
+        return None

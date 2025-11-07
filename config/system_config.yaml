@@ -21,7 +21,31 @@ simulation:
 # These are loaded by the BehaviorFactory
 detectors:
   thermal_detector:
-    threshold: 0.9
+    # --- NEW: Configuration for multi-strategy detector ---
+    debug: true # Set to true to open a live "Thermal Debug" window
+    confidence: 0.95
+    min_area: 20 # Smallest pixel area to count as a detection
+    
+    # Strategy 1: Simple Threshold (finds brightest spots)
+    strategy_simple_threshold:
+      enabled: true
+      threshold: 220 # (0-255) Grayscale value to consider "hot"
+
+    # Strategy 2: Adaptive Threshold (statistical approach)
+    strategy_adaptive_threshold:
+      enabled: true
+      block_size: 25 # Pixel neighborhood size (must be odd)
+      c_value: 10     # Constant subtracted from the mean
+
+    # Strategy 3: Edge Detection (finds thermal edges)
+    strategy_edge_detection:
+      enabled: false # Off by default
+      canny_threshold1: 100
+      canny_threshold2: 200
+
+  # --- NEW: Config for standalone ObstacleDetector ---
+  obstacle_detector:
+    min_distance_m: 2.0 # Used by SafetyMonitor, not plugin
 
 strategies:
   lawnmower:
@@ -37,6 +61,3 @@ actuators:
     release_time_sec: 2
 
 # Safety monitor configuration
-safety:
-  battery_low_threshold: 25.0
-  geofence_path: "drone/config/geofence.json" # (File doesn't exist, but shows setting)

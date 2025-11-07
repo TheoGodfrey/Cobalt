@@ -4,7 +4,7 @@ HAL Implementation: SimulatedController
 
 import asyncio
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 # Import base class
 from .hal import BaseFlightController
@@ -15,6 +15,7 @@ from .vehicle_state import Telemetry, VehicleModeEnum, GPSStatusEnum
 # Import protocols (interfaces)
 from ..g3_capability_plugins.strategies.base import Waypoint
 from .sensors.cameras.base import BaseCamera, SimulatedCamera
+from .sensors.lidar import Lidar, SimulatedLidar # <-- NEW
 from ..g3_capability_plugins.actuators.base import ActuatorHardware
 
 class SimulatedActuator(ActuatorHardware):
@@ -50,6 +51,7 @@ class SimulatedController(BaseFlightController):
         # Simulated hardware inventory
         self._cameras = {0: SimulatedCamera(0)}
         self._actuators = {0: SimulatedActuator()}
+        self._lidars = {0: SimulatedLidar(0)} # <-- NEW
         
     async def connect(self):
         print(f"[SimulatedHAL] Connecting to simulated drone (Speed: {self._flight_speed_ms} m/s)...")
@@ -57,6 +59,28 @@ class SimulatedController(BaseFlightController):
         # Start the background task that updates telemetry
         self._telemetry_task = asyncio.create_task(self._update_telemetry())
         print("[SimulatedHAL] Connection successful.")
+
+    async def detect_hardware(self) -> List[str]:
+        """
+        Simulates hardware detection.
+        Returns the hardware list passed in from fleet_config.yaml.
+        """
+        print("[SimulatedHAL] Simulating hardware detection...")
+        await asyncio.sleep(0.25) # Simulate a check
+        
+        # For simulation, the "actual" hardware is what we configured
+        # in fleet_config.yaml, which was injected into self.config.
+        detected = self.config.get('hardware', [])
+        
+        # We can also add default simulated hardware
+        if "gps" not in detected:
+            detected.append("gps")
+        if "camera_thermal" not in detected and 0 in self._cameras:
+             detected.append("camera_thermal")
+        if "lidar" not in detected and 0 in self._lidars: # <-- NEW
+             detected.append("lidar")
+             
+        return list(set(detected)) # Return unique list
 
     async def _update_telemetry(self):
         """A background task to simulate the drone's state over time."""
@@ -154,9 +178,20 @@ class SimulatedController(BaseFlightController):
         await self.disarm()
         print("[SimulatedHAL] Landed.")
         return True
+        
+    async def stop_movement(self):
+        """Simulates an immediate brake by clearing the target position."""
+        print("[SimulatedHAL] *** STOP MOVEMENT (BRAKE) ***")
+        if self._target_pos:
+            self._target_pos = None
+            print("[SimulatedHAL] Active goto command cancelled.")
 
     def get_camera(self, camera_id: int) -> BaseCamera:
         return self._cameras[camera_id]
         
     def get_actuator_hardware(self, actuator_id: int) -> ActuatorHardware:
         return self._actuators[actuator_id]
+        
+    def get_lidar_sensor(self, sensor_id: int) -> Lidar:
+        """Get an interface to a Lidar sensor."""
+        return self._lidars[sensor_id]
