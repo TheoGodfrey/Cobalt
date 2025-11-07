@@ -37,11 +37,13 @@ class SafetyMonitor:
     """Watches all components for hazardous conditions"""
     
     # FIX: Update __init__ to accept state objects
-    def __init__(self, config: dict, mqtt, mission_state: MissionState, vehicle_state: VehicleState):
+    def __init__(self, config: dict, mqtt, mission_state: MissionState, 
+                 vehicle_state: VehicleState, mission_active_event: asyncio.Event): # <-- MODIFIED
         self.config = config
         self.mqtt = mqtt
         self.mission_state = mission_state
         self.vehicle_state = vehicle_state
+        self.mission_active_event = mission_active_event # <-- ADDED
         self.violations = []
         
         # Checkers now follow the BaseSafetyCheck interface
@@ -54,21 +56,33 @@ class SafetyMonitor:
     
     async def monitor_loop(self):
         """Continuous safety monitoring"""
-        while True:
-            for checker in self.checkers:
-                # FIX: Pass the state objects to the checker
-                violation = await checker.check(self.mission_state, self.vehicle_state)
-                if violation:
-                    await self.handle_violation(violation)
-            
-            # Check vehicle state for manual override
-            if self.vehicle_state.mode == "MANUAL":
-                # This is an example of a direct check
-                if self.mission_state.current != "PAUSED":
-                    print("[SafetyMonitor] Manual override detected! Pausing mission.")
-                    self.mission_state.pause()
+        print("[SafetyMonitor] Monitor loop started.")
+        while self.mission_active_event.is_set(): # <-- MODIFIED
+            try:
+                for checker in self.checkers:
+                    # FIX: Pass the state objects to the checker
+                    violation = await checker.check(self.mission_state, self.vehicle_state)
+                    if violation:
+                        await self.handle_violation(violation)
+                
+                # Check vehicle state for manual override
+                if self.vehicle_state.mode == "MANUAL":
+                    # This is an example of a direct check
+                    if self.mission_state.current != "PAUSED":
+                        print("[SafetyMonitor] Manual override detected! Pausing mission.")
+                        self.mission_state.pause()
 
-            await asyncio.sleep(0.1)
+                await asyncio.sleep(0.1) # <-- MODIFIED (was 0.1)
+            
+            except asyncio.CancelledError:
+                print("[SafetyMonitor] Monitor loop cancelled.")
+                break
+            except Exception as e:
+                print(f"[SafetyMonitor] Error in monitor loop: {e}")
+                await asyncio.sleep(1) # Prevent fast crash loop
+        
+        print("[SafetyMonitor] Mission event cleared. Monitor loop shutting down.")
+
     
     async def handle_violation(self, violation: dict):
         """Execute safety action based on violation data"""
@@ -83,7 +97,7 @@ class SafetyMonitor:
             # await self.trigger_rth()
             print("[SafetyMonitor] HIGH: Triggering RTH (Simulated)")
         
-        if self.mqtt.is_connected():
+        if self.mqtt.is_connected(): # <-- ADD THIS CHECK
             await self.mqtt.publish("fleet/safety/violation", violation)
 
 # --- Individual Checker Implementations ---

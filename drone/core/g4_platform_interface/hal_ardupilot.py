@@ -10,7 +10,9 @@ flight controller, such as the one in the SplashDrone 4+.
 import time
 import logging
 import math  # <-- FIX 1.1: Added math for radian conversion
-from typing import Optional, Callable
+import asyncio # <-- NEW: Added for async camera
+import cv2     # <-- NEW: Added for OpenCV
+from typing import Optional, Callable, Any # <-- NEW: Added Any
 from dronekit import connect, VehicleMode, LocationGlobalRelative, APIException
 from .hal import BaseFlightController
 from .sensors.cameras.base import BaseCamera
@@ -34,29 +36,86 @@ ALTITUDE_REACHED_THRESHOLD = 0.95 # 95% of target altitude
 
 class ArduPilotCamera(BaseCamera):
     """
-    A virtual camera implementation for ArduPilot.
-    It doesn't provide a video stream itself, but provides the *URL*
-    to the stream which a G3 detector (like ThermalDetector) will open.
+    A camera implementation for ArduPilot that uses OpenCV to capture
+    a video stream from a URL.
+    This fulfills the BaseCamera interface required by detectors.
     """
     def __init__(self, stream_url: str):
+        """
+        Initializes the camera.
+        
+        Args:
+            stream_url: The RTSP or HTTP stream URL for this camera.
+        """
         self._stream_url = stream_url
+        self._cap: Optional[cv2.VideoCapture] = None
+        self._is_streaming = False
+        self._loop = asyncio.get_running_loop()
         log.info(f"[HAL-ArduPilot] Camera initialized. Stream URL: {self._stream_url}")
 
-    def get_stream_url(self) -> str:
-        """Returns the RTSP or HTTP stream URL for this camera."""
-        return self._stream_url
+    async def start_streaming(self):
+        """(Re)starts the video capture stream."""
+        if self._is_streaming and self._cap:
+            return # Already running
+            
+        log.info(f"[HAL-ArduPilot] Starting OpenCV capture from {self._stream_url}...")
+        try:
+            # VideoCapture is a blocking call, run in thread
+            self._cap = await asyncio.to_thread(cv2.VideoCapture, self._stream_url)
+            
+            if not self._cap.isOpened():
+                log.error(f"[HAL-ArduPilot] Failed to open video stream: {self._stream_url}")
+                self._cap = None
+                self._is_streaming = False
+            else:
+                self._is_streaming = True
+                log.info("[HAL-ArduPilot] Video stream started.")
+        except Exception as e:
+            log.error(f"[HAL-ArduPilot] Error starting video stream: {e}")
+            self._cap = None
+            self._is_streaming = False
 
-    def start(self):
-        # In this HAL, we don't control the stream, we just provide the URL.
-        pass
+    async def stop_streaming(self):
+        """Stops the video capture stream."""
+        if self._cap:
+            log.info("[HAL-ArduPilot] Stopping video stream...")
+            # release() is blocking, run in thread
+            await asyncio.to_thread(self._cap.release)
+            self._cap = None
+        self._is_streaming = False
+        log.info("[HAL-ArduPilot] Video stream stopped.")
 
-    def stop(self):
-        pass
-
-    def capture(self):
-        # Capture is handled by the G3 detector (e.g., OpenCV)
-        log.warning("[HAL-ArduPilot] .capture() called on camera. This should be handled by a G3 detector.")
-        return None
+    async def get_frame(self) -> Any: # Returns a numpy array
+        """
+        Get the latest frame from the camera.
+        
+        This runs the blocking OpenCV read() call in a thread to
+        avoid stalling the main asyncio event loop.
+        """
+        if not self._is_streaming or not self._cap:
+            log.warning("[HAL-ArduPilot] get_frame called but stream is not active. Attempting to start...")
+            await self.start_streaming()
+            if not self._is_streaming:
+                log.error("[HAL-ArduPilot] Stream failed to start. Cannot get frame.")
+                return None # Failed to start
+        
+        try:
+            # cap.read() is a blocking I/O operation
+            ret, frame = await asyncio.to_thread(self._cap.read)
+            
+            if not ret:
+                log.warning("[HAL-ArduPilot] Failed to read frame from stream. Stream may have ended. Reconnecting...")
+                # Attempt to reconnect
+                await self.stop_streaming()
+                await self.start_streaming()
+                return None
+            
+            return frame # This is the numpy array
+            
+        except Exception as e:
+            log.error(f"[HAL-ArduPilot] Error reading frame: {e}")
+            await self.stop_streaming() # Stop on error
+            return None
 
 class ArduPilotController(BaseFlightController):
     """
@@ -144,6 +203,9 @@ class ArduPilotController(BaseFlightController):
             
             self.vehicle.close()
             self.vehicle = None
+            
+        # Stop the camera stream
+        await self._camera.stop_streaming()
             
         log.info("[HAL-ArduPilot] Disconnected.")
 
@@ -304,12 +366,15 @@ class ArduPilotController(BaseFlightController):
         # --- Get Location ---
         pos = Waypoint(telem.position.x, telem.position.y, telem.position.z)
         loc = self.vehicle.location.global_relative_frame # <-- Get the object
+        
+        # --- FIX: Check object and its attributes before use (Race Condition) ---
         if loc and loc.lat is not None and loc.lon is not None and loc.alt is not None:
-            loc = self.vehicle.location.global_relative_frame
             # Note: G3 Strategies use X,Y,Z. This HAL provides Lat/Lon/Alt.
             # This is a different inconsistency, but for now we'll update
             # the Waypoint with Lat/Lon/Alt.
             pos = Waypoint(x=loc.lat, y=loc.lon, z=loc.alt, yaw=telem.position.yaw)
+        # --- End of FIX ---
+        
         # --- FIX 1.1: Get full attitude ---
         # Get defaults from current state
         att_roll = telem.attitude_roll
@@ -412,4 +477,3 @@ class ArduPilotController(BaseFlightController):
     def _gps_callback(self, vehicle, attr_name, msg):
         if msg:
             self._update_full_telemetry()
-

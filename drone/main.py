@@ -88,16 +88,32 @@ async def main():
         # Merge them. The fleet data is top-priority.
         config = {**system_config, **fleet_config_data}
         # --- END OF NEW LOADING LOGIC ---
+        
+        # --- NEW: Get role from fleet_config as single source of truth ---
+        fleet_config = config.get('fleet', {})
+        drone_config = fleet_config.get(args.id, {})
+        
+        drone_role = drone_config.get('role')
+        if not drone_role:
+            logger.log(f"CRITICAL: No 'role' defined for drone '{args.id}' in fleet_config.yaml.", "error")
+            raise ValueError(f"No 'role' defined for drone '{args.id}' in fleet_config.yaml.")
+        
+        # Get all unique, valid roles defined in the fleet config
+        valid_roles = list(set(
+            d.get('role') for d in fleet_config.values() if d.get('role')
+        ))
+        logger.log(f"Drone role identified as: '{drone_role}'", "info")
+        logger.log(f"All valid fleet roles: {valid_roles}", "info")
+        # --- End of FIX ---
 
+        # --- FIX: Pass valid_roles to the parser ---
         logger.log("Loading mission file...", "info")
         mission_data = load_mission_file(Path(args.mission))
-        mission_flow = parse_mission_flow(mission_data)
+        mission_flow = parse_mission_flow(mission_data, valid_roles) # <-- MODIFIED
         logger.log(f"Mission '{mission_flow.mission_id}' loaded successfully", "info")
         
         # --- NEW: Hardware-Aware Refactor ---
         # Look up this drone's specific config from the fleet
-        fleet_config = config.get('fleet', {})
-        drone_config = fleet_config.get(args.id, {})
         
         # Extract the hardware list.
         hardware_list = drone_config.get('hardware', [])
@@ -106,6 +122,11 @@ async def main():
                          f"Hardware validation may fail.", "warning")
         else:
             logger.log(f"Found hardware: {hardware_list}", "info")
+        # --- End of NEW ---
+        
+        # --- NEW: Create shared shutdown event ---
+        mission_active_event = asyncio.Event()
+        mission_active_event.set() # Start in the "running" state
         # --- End of NEW ---
         
         # 2. Create hardware layer
@@ -141,7 +162,9 @@ async def main():
             mqtt=mqtt,
             safety_monitor=None,  # Pass None for now
             config=config,
-            hardware_list=hardware_list  # NEW: Pass hardware list
+            hardware_list=hardware_list,
+            drone_role=drone_role,
+            mission_active_event=mission_active_event # <-- Pass event
         )
         
         # 4. Create safety monitor SECOND
@@ -151,7 +174,8 @@ async def main():
             config=safety_config,
             mqtt=mqtt,
             mission_state=controller.mission_state,  # <-- Pass the *existing* instance
-            vehicle_state=vehicle_state
+            vehicle_state=vehicle_state,
+            mission_active_event=mission_active_event # <-- Pass event
         )
         
         # Now, link the safety_monitor back to the controller
@@ -186,17 +210,21 @@ async def main():
     except KeyboardInterrupt:
         logger.log("Mission interrupted by user", "warning")
         print("\n[Main] Shutting down gracefully...")
+        if 'mission_active_event' in locals():
+            mission_active_event.clear() # Signal loops to exit
         
     except Exception as e:
         logger.log(f"CRITICAL ERROR: {e}", "error")
         import traceback
         logger.log(traceback.format_exc(), "error")
+        if 'mission_active_event' in locals():
+            mission_active_event.clear() # Signal loops to exit
         raise
         
     finally:
         # ... existing cleanup ...
         try:
-            if 'mqtt' in locals():
+            if 'mqtt' in locals() and mqtt.is_connected():
                 await mqtt.disconnect()
             if 'flight_controller' in locals():
                 await flight_controller.disarm()
@@ -214,4 +242,3 @@ if __name__ == "__main__":
         print(f"\n[Main] Fatal error: {e}")
         import sys
         sys.exit(1)
-

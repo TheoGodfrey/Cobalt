@@ -4,7 +4,7 @@ Responsible for validating raw mission data against a schema and parsing
 it into strongly-typed MissionFlow objects.
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, List
 import jsonschema
 from .mission_flow import MissionFlow, HubFailsafe
 from .phase import Phase, Task
@@ -84,7 +84,7 @@ MISSION_SCHEMA = {
     }
 }
 
-def validate_mission_data(data: Dict[str, Any]) -> None:
+def validate_mission_data(data: Dict[str, Any], valid_roles: List[str]) -> None: # <-- MODIFIED
     """
     Validates a raw mission dictionary against the MISSION_SCHEMA.
 
@@ -109,12 +109,24 @@ def validate_mission_data(data: Dict[str, Any]) -> None:
         # This single call checks for required fields, types, enums, etc.
         jsonschema.validate(instance=data, schema=MISSION_SCHEMA)
 
+        # --- NEW: Validate task roles against fleet_config.yaml ---
+        # This ensures the mission JSON only uses roles defined in the fleet config.
+        if "phases" in data:
+            valid_roles_set = set(valid_roles)
+            for phase_name, phase_data in data["phases"].items():
+                if "tasks" in phase_data:
+                    for task_role in phase_data["tasks"].keys():
+                        if task_role not in valid_roles_set:
+                            raise MissionParseError(
+                                f"Mission schema validation failed: "
+                                f"Invalid role '{task_role}' in phase '{phase_name}'. "
+                                f"Valid roles from fleet_config.yaml are: {valid_roles}")
     except jsonschema.ValidationError as e:
         raise MissionParseError(f"Mission schema validation failed: {e.message}")
     except Exception as e:
         raise MissionParseError(f"An unexpected error occurred during validation: {e}")
 
-def parse_mission_flow(data: Dict[str, Any]) -> MissionFlow:
+def parse_mission_flow(data: Dict[str, Any], valid_roles: List[str]) -> MissionFlow: # <-- MODIFIED
     """
     Parses a validated raw mission dictionary into a MissionFlow object.
 
@@ -129,7 +141,7 @@ def parse_mission_flow(data: Dict[str, Any]) -> MissionFlow:
     """
     try:
         # 1. Validate the raw data first
-        validate_mission_data(data)
+        validate_mission_data(data,valid_roles)
 
         # 2. Parse Phases and Tasks (bottom-up)
         parsed_phases: Dict[str, Phase] = {}

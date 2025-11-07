@@ -3,21 +3,23 @@ Component 3: Mission Controller
 Generic flow interpreter - NO mission-specific logic
 """
 import asyncio
-from typing import Optional, Dict, Set, Any, List # NEW: Added List
+from typing import Optional, Dict, Set, Any, List, Coroutine
+
 from ..g1_mission_definition.mission_flow import MissionFlow
 # Import the enum as well to map strings to enum members
 from ..g2_execution_core.mission_state import (
     MissionState, MissionStateEnum, 
     MISSION_PHASE_TO_ENUM, MISSION_ENUM_TO_PHASE # <-- FIX for Bug #11
 )
-from ..g2_execution_core.behaviors import BehaviorFactory
+from ..g2_execution_core.behaviors import BehaviorFactory, BaseBehavior
 
 class MissionController:
     """Generic orchestrator that executes any mission from JSON"""
     
     def __init__(self, mission_flow: MissionFlow, flight_controller, 
                  vehicle_state, mqtt, safety_monitor, config, 
-                 hardware_list: List[str]): # NEW: Added hardware_list
+                 hardware_list: List[str], drone_role: str,
+                 mission_active_event: asyncio.Event): # <-- MODIFIED
         self.mission_flow = mission_flow
         self.mission_state = MissionState()
         self.flight_controller = flight_controller
@@ -26,39 +28,32 @@ class MissionController:
         self.safety_monitor = safety_monitor
         self.config = config
         self.hardware_list = hardware_list # NEW: Store hardware_list
+        self.drone_role = drone_role # <-- MODIFIED: Store the role
+        self.mission_active_event = mission_active_event # <-- ADDED
         
         # This assumes BehaviorFactory is implemented in behaviors.py (Bug #1)
         # NEW: Pass hardware_list to factory
         self.behavior_factory = BehaviorFactory(config, self.hardware_list)
         
-        # FIX for Bug #5: Track triggered events
-        self._triggered_events: Set[str] = set()
+        # --- NEW: Event-driven trigger logic ---
+        # Stores the valid triggers for the *current* phase
+        self._current_phase_triggers: Set[str] = set()
+        # An event that the main loop waits on, set by *any* valid trigger
+        self._trigger_event_fired = asyncio.Event()
+        self._fired_trigger: Optional[str] = None
         self._event_lock = asyncio.Lock()
+        
+        # The persistent MQTT listener task
+        self._mqtt_listener_task: Optional[asyncio.Task] = None
+        # --- End of NEW ---
         
         # Track state change listeners for cleanup
         self._state_listeners = []
     
-    # ... existing get_my_role() ...
-    # FIX for Bug #2: Implement get_my_role()
-    def get_my_role(self) -> str:
-        """
-        Determines the drone's role from its client ID.
-        This is a simple implementation based on naming conventions.
-        e.g., "scout_1" -> "scout", "payload_1" -> "payload"
-        """
-        # The drone_id is used as the mqtt client_id
-        client_id = self.mqtt._client_id 
-        
-        if client_id.startswith("scout"):
-            return "scout"
-        if client_id.startswith("payload"):
-            return "payload"
-        if client_id.startswith("utility"):
-            return "utility"
-            
-        # Fallback role if no convention matches
-        print(f"[MissionController] WARNING: Could not determine role from ID '{client_id}'. Defaulting to 'scout'.")
-        return "scout"
+    # --- This method is now REMOVED (per previous fix) ---
+    # def get_my_role(self) -> str:
+    # ...
+    # --- End of REMOVED ---
 
     # ... existing execute_mission() ...
     async def execute_mission(self):
@@ -66,6 +61,11 @@ class MissionController:
         
         current_phase_key = "None" # For error logging
         next_phase_name = "None" # For error logging
+        current_behavior: Optional[BaseBehavior] = None
+        
+        # --- NEW: Start the persistent MQTT listener ---
+        self._mqtt_listener_task = asyncio.create_task(self._persistent_mqtt_listener())
+        # --- End of NEW ---
         
         try:
             # Start at the defined start phase
@@ -81,7 +81,7 @@ class MissionController:
             self.mission_state.transition(start_phase_enum)
             
             # Check if mission is complete (e.g., if start_phase was RTH)
-            while not self.mission_state.current in (MissionStateEnum.MISSION_COMPLETE, MissionStateEnum.ABORTED, MissionStateEnum.IDLE):
+            while not self.mission_state.current in (MissionStateEnum.MISSION_COMPLETE, MissionStateEnum.ABORTED, MissionStateEnum.IDLE) and self.mission_active_event.is_set(): # <-- MODIFIED
                 # Get current phase definition from JSON
                 
                 # --- FIX for Bug #11 (This is the line 73 issue) ---
@@ -93,25 +93,73 @@ class MissionController:
                 phase = self.mission_flow.phases[current_phase_key]
                 
                 # Execute all tasks for this drone's role
-                drone_role = self.get_my_role()
+                drone_role = self.drone_role # <-- MODIFIED
                 if drone_role in phase.tasks:
                     task = phase.tasks[drone_role]
                     
                     # FIX: Pass all required dependencies to the factory
-                    behavior = self.behavior_factory.create(
+                    current_behavior = self.behavior_factory.create(
                         task, 
                         self.mission_state, 
                         self.flight_controller  # The HAL is passed in as flight_controller
                     )
-                    await behavior.start()
+                    await current_behavior.start()
                 
-                # Evaluate transitions
-                # Bug #5: wait_for_trigger is unimplemented and will hang
-                trigger = await self.wait_for_trigger(phase.transitions)
+                # --- REFACTORED: Event-driven trigger logic ---
+                transitions = phase.transitions
+                if not transitions:
+                    print(f"[MissionController] Phase '{current_phase_key}' has no transitions. Mission will end.")
+                    break # No transitions, exit loop
+
+                # 1. Clear the event from the last phase
+                self._trigger_event_fired.clear()
+                self._fired_trigger = None
+                
+                # 2. Set the valid triggers for this new phase
+                async with self._event_lock:
+                    self._current_phase_triggers = set(transitions.keys())
+                print(f"[MissionController] Phase '{current_phase_key}' started. Waiting for triggers: {self._current_phase_triggers}")
+                
+                # 3. Create tasks for phase-specific triggers (state, timeout)
+                phase_specific_tasks = self._create_phase_listeners(transitions)
+                
+                # 4. Wait for a trigger (global MQTT or phase-specific) OR shutdown
+                wait_tasks = [
+                    asyncio.create_task(self._trigger_event_fired.wait(), name="wait_for_global_trigger"),
+                    asyncio.create_task(self.mission_active_event.wait(), name="wait_for_shutdown")
+                ]
+                
+                done, pending = await asyncio.wait(
+                    wait_tasks + phase_specific_tasks, 
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                # 5. A trigger has fired or we are shutting down. Stop behavior.
+                if current_behavior:
+                    await current_behavior.stop()
+                    
+                # 6. Cancel all other pending listeners for this phase
+                for task in pending:
+                    task.cancel()
+                    
+                # 7. Check if shutdown was the trigger
+                if not self.mission_active_event.is_set():
+                    print("[MissionController] Shutdown event received, exiting mission loop.")
+                    break # Exit the main while loop
+                
+                # 8. Get the trigger that fired
+                trigger = self._fired_trigger
+                if not trigger:
+                    # This could happen if a state/timeout task won the race
+                    # but hadn't set self._fired_trigger yet. Find it.
+                    for task in done:
+                        if task.name().startswith("state_") or task.name().startswith("timeout_"):
+                            trigger = await task # Get the result (trigger key)
+                            break
                 
                 if trigger:
-                    # FIX: Parse "goto:delivery" string to MissionStateEnum.DELIVERING
-                    next_phase_str = phase.transitions[trigger][drone_role]
+                    # We have a valid trigger, find the next phase
+                    next_phase_str = transitions[trigger][drone_role] # <-- MODIFIED
                     
                     # --- FIX for Bug #11 ---
                     next_phase_key = next_phase_str.replace("goto:", "")
@@ -124,250 +172,192 @@ class MissionController:
                     # FIX: Method is .transition(), not .transition_to()
                     self.mission_state.transition(next_phase_enum)
                 else:
-                    # If wait_for_trigger returns None (e.g., not implemented)
-                    print("[MissionController] No trigger returned. Assuming mission is stuck.")
+                    # This should not be reachable if transitions exist
+                    print("[MissionController] No trigger found but loop ended. Aborting.")
+                    self.mission_state.transition(MissionStateEnum.ABORTED)
                     break
+                # --- END OF REFACTORED LOGIC ---
+            
+            if not self.mission_active_event.is_set():
+                print("[MissionController] Mission externally shut down. Aborting.")
+                self.mission_state.transition(MissionStateEnum.ABORTED)
                     
         except KeyError as e:
             print(f"[MissionController] CRITICAL ERROR: Phase mismatch or invalid key: {e}")
             print(f"  Check if '{current_phase_key}' or (if defined) '{next_phase_name}' exists in mission file and MissionStateEnum.")
             # FIX: Method is .transition(), not .transition_to()
             self.mission_state.transition(MissionStateEnum.ABORTED)
+        except asyncio.CancelledError:
+            print("[MissionController] Execute mission loop cancelled.")
+            self.mission_state.transition(MissionStateEnum.ABORTED)
         except Exception as e:
             print(f"[MissionController] CRITICAL ERROR during execution: {e}")
-            # FIX: Method is .transition(), not .transition_to()
             self.mission_state.transition(MissionStateEnum.ABORTED)
         finally:
-            # Cleanup listeners
+            # Cleanup main tasks
+            if current_behavior:
+                await current_behavior.stop()
+            if self._mqtt_listener_task:
+                self._mqtt_listener_task.cancel()
             await self._cleanup_listeners()
+            # --- NEW: Signal all other loops to shut down ---
+            print("[MissionController] Mission complete. Signaling shutdown.")
+            self.mission_active_event.clear()
+            # --- End of NEW ---
     
     # ====================================================================================
-    # FIX for Bug #5: Implement wait_for_trigger
+    # NEW: Persistent MQTT Listener and Handlers
     # ====================================================================================
-    
-    async def wait_for_trigger(self, transitions: Dict[str, Dict[str, str]], timeout: float = 3600.0) -> Optional[str]:
-        """
-        Wait for any transition trigger to fire.
-        
-        This is a GENERIC implementation that reads trigger definitions from the mission JSON
-        and monitors for:
-        1. MQTT events (on_event:*)
-        2. Mission state changes (on_state:*)
-        3. Vehicle state changes (on_vehicle_state:*)
-        4. Timeouts (on_timeout:*)
-        
-        Args:
-            transitions: Dict mapping trigger strings to destination phases
-            timeout: Maximum time to wait in seconds (default: 1 hour)
-            
-        Returns:
-            The trigger string that fired (e.g., "on_event:target_found")
-            or None if timeout occurs
-            
-        Example transition dict:
-        {
-            "on_event:target_found": {"scout": "goto:delivery", "payload": "goto:delivery"},
-            "on_state:ABORTED": {"scout": "goto:idle", "payload": "goto:idle"},
-            "on_timeout:300": {"scout": "goto:returning", "payload": "goto:returning"}
-        }
-        """
-        
-        if not transitions:
-            print("[MissionController] No transitions defined for this phase. Phase will complete immediately.")
-            return None
-        
-        print(f"[MissionController] Waiting for one of {len(transitions)} possible triggers...")
-        
-        # Clear any previously triggered events
-        async with self._event_lock:
-            self._triggered_events.clear()
-        
-        # Parse the transitions and set up listeners
-        event_triggers = []
-        state_triggers = []
-        timeout_triggers = []
-        
-        for trigger_key in transitions.keys():
-            if trigger_key.startswith("on_event:"):
-                event_name = trigger_key.split(":", 1)[1]
-                event_triggers.append((trigger_key, event_name))
-                
-            elif trigger_key.startswith("on_state:"):
-                state_name = trigger_key.split(":", 1)[1]
-                state_triggers.append((trigger_key, state_name))
-                
-            elif trigger_key.startswith("on_timeout:"):
-                timeout_seconds = float(trigger_key.split(":", 1)[1])
-                timeout_triggers.append((trigger_key, timeout_seconds))
-        
-        # Create monitoring tasks
-        tasks = []
-        
-        # Monitor MQTT events
-        if event_triggers:
-            event_task = asyncio.create_task(
-                self._monitor_events(event_triggers),
-                name="monitor_events"
-            )
-            tasks.append(event_task)
-        
-        # Monitor mission state changes
-# Monitor mission state changes
-        if state_triggers:
-            state_task = asyncio.create_task(
-                self._monitor_state_changes(state_triggers, self.mission_state), # <-- Pass self.mission_state
-                name="monitor_states"
-            )
-            tasks.append(state_task)
-        
-        # Set up timeout triggers
-        for trigger_key, timeout_seconds in timeout_triggers:
-            timeout_task = asyncio.create_task(
-                self._wait_timeout(trigger_key, timeout_seconds),
-                name=f"timeout_{timeout_seconds}"
-            )
-            tasks.append(timeout_task)
-        
-        # Add a master timeout
-        master_timeout_task = asyncio.create_task(
-            asyncio.sleep(timeout),
-            name="master_timeout"
-        )
-        tasks.append(master_timeout_task)
-        
-        try:
-            # Wait for the first task to complete
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            
-            # Cancel all pending tasks
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-            
-            # Get the result from the completed task
-            completed_task = done.pop()
-            
-            if completed_task == master_timeout_task:
-                print(f"[MissionController] Master timeout ({timeout}s) reached. No trigger fired.")
-                return None
-            
-            # Get the trigger that fired
-            triggered = await completed_task
-            print(f"[MissionController] Trigger fired: {triggered}")
-            return triggered
-            
-        except Exception as e:
-            print(f"[MissionController] Error in wait_for_trigger: {e}")
-            # Cancel all tasks on error
-            for task in tasks:
-                task.cancel()
-            return None
-    
-    async def _monitor_events(self, event_triggers: list) -> str:
-        """
-        Monitors MQTT for fleet-wide events.
-        
-        Args:
-            event_triggers: List of (trigger_key, event_name) tuples
-            
-        Returns:
-            The trigger_key that fired
-        """
-        print(f"[MissionController] Monitoring for events: {[e[1] for e in event_triggers]}")
-        
-        # Subscribe to fleet-wide event topics
-        event_names = [event_name for _, event_name in event_triggers]
-        
-        async def event_callback(topic: str, payload: Dict[str, Any]):
-            """Called when an event message arrives."""
-            event_type = payload.get("event_type")
-            
-            # Check if this event matches any of our triggers
-            for trigger_key, event_name in event_triggers:
-                if event_type == event_name:
-                    async with self._event_lock:
-                        self._triggered_events.add(trigger_key)
-                    print(f"[MissionController] Event detected: {event_name}")
-        
-        # Subscribe to the fleet events topic
-        await self.mqtt.subscribe("fleet/events/+", event_callback)
-        
-        # Poll until an event is triggered
-        while True:
-            async with self._event_lock:
-                for trigger_key, _ in event_triggers:
-                    if trigger_key in self._triggered_events:
-                        return trigger_key
-            await asyncio.sleep(0.1)
-    
-    async def _monitor_state_changes(self, state_triggers: list, mission_state: MissionState) -> str:
-        """
-        Monitors MissionState for state changes.
-        
-        Args:
-            state_triggers: List of (trigger_key, state_name) tuples
-            mission_state: The current mission state object
-            
-        Returns:
-            The trigger_key that fired
-        """
-        print(f"[MissionController] Monitoring for state changes: {[s[1] for s in state_triggers]}")
 
+    async def _persistent_mqtt_listener(self):
+        """
+        A single, persistent task that listens for all relevant external MQTT topics.
+        """
+        try:
+            print("[MissionController] Starting persistent MQTT listener...")
+            my_id = self.mqtt._client_id
+            
+            # Subscribe to Hub commands
+            await self.mqtt.subscribe(
+                f"fleet/commands/{my_id}",
+                self._handle_hub_command
+            )
+            # Subscribe to Hub-confirmed events
+            await self.mqtt.subscribe(
+                "fleet/events/+",
+                self._handle_fleet_event
+            )
+            # Subscribe to peer detections
+            await self.mqtt.subscribe(
+                "fleet/detections/+",
+                self._handle_peer_detection
+            )
+            
+            print("[MissionController] MQTT subscriptions active.")
+            # Keep the listener alive until the mission ends
+            await self.mission_active_event.wait()
+            
+        except asyncio.CancelledError:
+            print("[MissionController] Persistent MQTT listener cancelled.")
+        except Exception as e:
+            print(f"[MissionController] CRITICAL ERROR in MQTT listener: {e}")
+            self.mission_state.transition(MissionStateEnum.ABORTED)
+            self.mission_active_event.clear() # Trigger shutdown
+            
+    async def _handle_hub_command(self, topic: str, payload: Dict[str, Any]):
+        """Callback for messages on 'fleet/commands/{self.drone_id}'."""
+        command = payload.get("command", "unknown")
+        trigger_key = f"on_command:{command}"
+        print(f"[MissionController] Received Hub Command: {command}")
+        await self._check_and_fire_trigger(trigger_key, payload)
+
+    async def _handle_fleet_event(self, topic: str, payload: Dict[str, Any]):
+        """Callback for messages on 'fleet/events/+'."""
+        event_type = payload.get("event_type", "unknown")
+        trigger_key = f"on_event:{event_type}"
+        print(f"[MissionController] Received Fleet Event: {event_type}")
+        await self._check_and_fire_trigger(trigger_key, payload)
+
+    async def _handle_peer_detection(self, topic: str, payload: Dict[str, Any]):
+        """Callback for messages on 'fleet/detections/+'."""
+        # Don't fire for our own detections
+        if payload.get("drone_id") == self.mqtt._client_id:
+            return
+            
+        trigger_key = "on_event:peer_detection"
+        print(f"[MissionController] Received Peer Detection from {payload.get('drone_id')}")
+        await self._check_and_fire_trigger(trigger_key, payload)
+
+    async def _check_and_fire_trigger(self, trigger_key: str, payload: Optional[Dict] = None):
+        """
+        Central logic to check if a trigger is valid for the current phase
+        and fire the main event if it is.
+        """
+        async with self._event_lock:
+            if trigger_key in self._current_phase_triggers:
+                if not self._trigger_event_fired.is_set():
+                    print(f"[MissionController] TRIGGER FIRED: {trigger_key}")
+                    self._fired_trigger = trigger_key
+                    self._trigger_event_fired.set()
+                    # TODO: Pass payload to behavior if needed
+                else:
+                    print(f"[MissionController] Trigger {trigger_key} fired, but another trigger was already processed.")
+            # else:
+            #     print(f"[MissionController] Ignored trigger '{trigger_key}' (not valid for current phase).")
+
+    # ====================================================================================
+    # Phase-specific listeners (evolved from old wait_for_trigger)
+    # ====================================================================================
+
+    def _create_phase_listeners(self, transitions: Dict[str, Dict[str, str]]) -> List[asyncio.Task]:
+        """
+        Creates and returns a list of asyncio.Tasks for phase-specific
+        triggers (on_state, on_timeout).
+        """
+        tasks = []
+        for trigger_key in transitions.keys():
+            if trigger_key.startswith("on_state:"):
+                state_name = trigger_key.split(":", 1)[1]
+                tasks.append(asyncio.create_task(
+                    self._monitor_state_changes(trigger_key, state_name),
+                    name=f"state_{state_name}"
+                ))
+            elif trigger_key.startswith("on_timeout:"):
+                try:
+                    timeout_seconds = float(trigger_key.split(":", 1)[1])
+                    tasks.append(asyncio.create_task(
+                        self._wait_timeout(trigger_key, timeout_seconds),
+                        name=f"timeout_{timeout_seconds}"
+                    ))
+                except ValueError:
+                    print(f"[MissionController] WARNING: Invalid timeout '{trigger_key}'. Ignoring.")
+        return tasks
+
+    async def _monitor_state_changes(self, trigger_key: str, state_name: str):
+        """
+        Monitors MissionState for a specific state change.
+        """
         # Create a future that resolves when the state changes
         state_future = asyncio.Future()
         
         def state_listener(new_state: MissionStateEnum):
             """Called when mission state changes."""
-            state_name = new_state.name.upper()
-            
-            for trigger_key, expected_state in state_triggers:
-                if state_name == expected_state.upper():
-                    if not state_future.done():
-                        state_future.set_result(trigger_key)
-        
-        # --- FIX 1.3: Add listener FIRST ---
-        # Register the listener
-        self.mission_state.add_listener(state_listener)
-        self._state_listeners.append(state_listener)
-        # --- End of FIX 1.3 ---
-
-        # --- FIX 1.3: Check current state SECOND ---
-        current_state_name = mission_state.current.name.upper()
-        for trigger_key, expected_state in state_triggers:
-            if current_state_name == expected_state.upper():
-                print(f"[MissionController] State trigger '{trigger_key}' is already active.")
+            if new_state.name.upper() == state_name.upper():
                 if not state_future.done():
-                    state_future.set_result(trigger_key) # Resolve immediately
-                break # No need to check others
-        # --- End of FIX 1.3 ---
+                    state_future.set_result(True)
+        
+        # 1. Add listener
+        self.mission_state.add_listener(state_listener)
+        self._state_listeners.append(state_listener) # For cleanup
+
+        # 2. Check current state
+        if self.mission_state.current.name.upper() == state_name.upper():
+            if not state_future.done():
+                state_future.set_result(True) # Resolve immediately
         
         try:
-            # Wait for the state change (will return immediately if future is already set)
-            return await state_future
+            # Wait for the state change
+            await state_future
+            # Fire the trigger
+            await self._check_and_fire_trigger(trigger_key)
+        except asyncio.CancelledError:
+            pass # Task was cancelled, just exit
         finally:
-            # Cleanup
+            # Cleanup listener
             self.mission_state.remove_listener(state_listener)
             if state_listener in self._state_listeners:
                 self._state_listeners.remove(state_listener)
                 
-    async def _wait_timeout(self, trigger_key: str, timeout_seconds: float) -> str:
+    async def _wait_timeout(self, trigger_key: str, timeout_seconds: float):
         """
-        Waits for a specified timeout and returns the trigger.
-        
-        Args:
-            trigger_key: The trigger key (e.g., "on_timeout:300")
-            timeout_seconds: Time to wait in seconds
-            
-        Returns:
-            The trigger_key after timeout expires
+        Waits for a specified timeout and fires the trigger.
         """
-        print(f"[MissionController] Timeout trigger set for {timeout_seconds}s")
-        await asyncio.sleep(timeout_seconds)
-        print(f"[MissionController] Timeout trigger fired: {trigger_key}")
-        return trigger_key
+        try:
+            await asyncio.sleep(timeout_seconds)
+            # Timeout elapsed, fire the trigger
+            await self._check_and_fire_trigger(trigger_key)
+        except asyncio.CancelledError:
+            pass # Task was cancelled, just exit
     
     async def _cleanup_listeners(self):
         """Remove all registered listeners."""
@@ -387,7 +377,5 @@ class MissionController:
             event_name: The name of the event to trigger
         """
         trigger_key = f"on_event:{event_name}"
-        async with self._event_lock:
-            self._triggered_events.add(trigger_key)
         print(f"[MissionController] Event manually triggered: {event_name}")
-
+        await self._check_and_fire_trigger(trigger_key)
