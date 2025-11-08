@@ -197,7 +197,7 @@ async def main():
         safety_monitor = SafetyMonitor(
             config=safety_config,
             mqtt=mqtt,
-            mission_state=controller.mission_state,  # <-- Pass the *existing* instance
+            mission_controller=controller,  # <-- MODIFIED: Pass full controller
             vehicle_state=vehicle_state,
             mission_active_event=mission_active_event, # <-- Pass event
             flight_controller=flight_controller, # <-- NEW

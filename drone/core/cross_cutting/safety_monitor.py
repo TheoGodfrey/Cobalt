@@ -11,7 +11,8 @@ from ..g2_execution_core.mission_state import MissionState, MissionStateEnum
 from ..g4_platform_interface.vehicle_state import VehicleState, VehicleModeEnum # <-- Import VehicleModeEnum
 from ..g4_platform_interface.hal import BaseFlightController
 from ..g3_capability_plugins.detectors.obstacle_detector import ObstacleDetector
-
+from ..cross_cutting.communication import MqttClient # <-- NEW: Import MqttClient
+from ..g1_mission_definition.mission_flow import HubFailsafe # <-- NEW: Import Failsafe Enum
 
 # --- FIX: Define a common interface for all safety checkers ---
 class BaseSafetyCheck(ABC):
@@ -39,18 +40,26 @@ class BaseSafetyCheck(ABC):
 class SafetyMonitor:
     """Watches all components for hazardous conditions"""
     
-    # FIX: Update __init__ to accept state objects
-    def __init__(self, config: dict, mqtt, mission_state: MissionState, 
+    # --- MODIFIED: Accepts the full MissionController ---
+    def __init__(self, config: dict, mqtt: MqttClient, 
+                 mission_controller: 'MissionController', # <-- MODIFIED
                  vehicle_state: VehicleState, mission_active_event: asyncio.Event,
-                 flight_controller: BaseFlightController, # <-- NEW
-                 obstacle_detector: ObstacleDetector):    # <-- NEW
+                 flight_controller: BaseFlightController, 
+                 obstacle_detector: ObstacleDetector):    
         self.config = config
         self.mqtt = mqtt
-        self.mission_state = mission_state
+        # We get mission_state *from* the controller
+        self.mission_controller = mission_controller # <-- MODIFIED
+        self.mission_state = mission_controller.mission_state # <-- MODIFIED
         self.vehicle_state = vehicle_state
         self.mission_active_event = mission_active_event
-        self.hal = flight_controller # <-- NEW
+        self.hal = flight_controller 
         self.violations = []
+        
+        # --- NEW: State for Hub failsafe ---
+        self.hub_connection_lost = False
+        self.failsafe_triggered = False
+        # --- End NEW ---
         
         # Checkers now follow the BaseSafetyCheck interface
         self.checkers: List[BaseSafetyCheck] = [
@@ -99,6 +108,10 @@ class SafetyMonitor:
                         print("[SafetyMonitor] Manual override detected! Pausing mission.")
                         self.mission_state.pause()
 
+                # --- NEW: AUTONOMOUS FAILSAFE LOGIC ---
+                await self._check_hub_connection()
+                # --- End NEW ---
+
                 await asyncio.sleep(0.1) # <-- MODIFIED (was 0.1)
             
             except asyncio.CancelledError:
@@ -109,6 +122,51 @@ class SafetyMonitor:
                 await asyncio.sleep(1) # Prevent fast crash loop
         
         print("[SafetyMonitor] Mission event cleared. Monitor loop shutting down.")
+
+    # --- NEW: Hub Failsafe Check ---
+    async def _check_hub_connection(self):
+        """
+        Monitors the MQTT connection and triggers the defined hub failsafe.
+        This enables autonomous operation if the Hub connection is lost.
+        """
+        # Get the defined failsafe action from the mission file
+        failsafe_action = self.mission_controller.mission_flow.hub_failsafe
+        
+        if not self.mqtt.is_connected():
+            # We are disconnected
+            if not self.hub_connection_lost:
+                # This is the first moment we've noticed
+                self.hub_connection_lost = True
+                self.failsafe_triggered = False # Reset failsafe trigger
+                print("[SafetyMonitor] WARNING: Connection to Hub lost!")
+
+            # Only trigger the failsafe *once* per disconnection
+            if not self.failsafe_triggered:
+                print(f"[SafetyMonitor] Hub connection lost. Executing failsafe: {failsafe_action.name}")
+                self.failsafe_triggered = True # Mark as triggered
+                
+                if failsafe_action == HubFailsafe.RTH:
+                    self.mission_state.transition(MissionStateEnum.EMERGENCY_RTH)
+                
+                elif failsafe_action == HubFailsafe.LAND:
+                    await self.hal.land()
+                    self.mission_state.transition(MissionStateEnum.LANDING)
+                
+                elif failsafe_action == HubFailsafe.CONTINUE:
+                    # Tell the MissionController to revert to its local, autonomous logic
+                    print("[SafetyMonitor] Reverting to autonomous 'CONTINUE' behavior.")
+                    asyncio.create_task(self.mission_controller.activate_hub_failsafe_continue())
+                    
+        else:
+            # We are connected
+            if self.hub_connection_lost:
+                # We just reconnected
+                print("[SafetyMonitor] Reconnected to Hub.")
+                self.hub_connection_lost = False
+                self.failsafe_triggered = False
+                # If we were continuing, tell the controller the Hub is back
+                asyncio.create_task(self.mission_controller.deactivate_hub_failsafe())
+    # --- End NEW ---
 
     
     async def handle_violation(self, violation: dict):
