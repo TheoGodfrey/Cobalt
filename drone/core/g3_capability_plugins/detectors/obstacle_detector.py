@@ -5,7 +5,8 @@ the distance to the nearest obstacle.
 """
 import asyncio
 from typing import Dict, Any
-from ...g4_platform_interface.sensors import Lidar
+# FIX: Change import from the 'sensors' package to the 'lidar' module
+from ...g4_platform_interface.sensors.lidar import Lidar 
 
 class ObstacleDetector:
     """

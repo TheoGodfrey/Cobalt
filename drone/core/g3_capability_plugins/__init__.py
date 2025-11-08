@@ -90,8 +90,8 @@ def get_detector(
     config = config or {}
     
     if detector_type == "thermal_detector":
-        threshold = config.get("threshold", 0.9)
-        return ThermalDetector(camera, threshold=threshold)
+        # FIX: Pass the entire config object, not threshold as a keyword argument.
+        return ThermalDetector(camera, config)
     
     else:
         raise ValueError(
@@ -168,4 +168,3 @@ __all__ = [
     'BaseStrategy',
     'BaseActuator'
 ]
-

@@ -8,8 +8,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+# --- FIX: Import the explicit LocalPosition ---
+from ...utils.position import LocalPosition
+# --- End of FIX ---
+
 # --- Data Structures ---
-# Placeholder for a waypoint. Would be in a shared 'utils' module.
+# Waypoint is a *target* in local coordinates
 @dataclass
 class Waypoint:
     """A 3D navigation target."""
@@ -20,8 +24,14 @@ class Waypoint:
 
 class VehicleState(Protocol):
     """Protocol for the VehicleState component (G4)."""
-    async def get_position(self) -> Waypoint:
+    
+    # --- FIX: Strategies use local position ---
+    @property
+    def position_local(self) -> LocalPosition:
+        """Protocol for accessing the drone's local position."""
         ...
+    # --- End of FIX ---
+    
     # ... other state properties like battery, wind, etc.
 
 # --- Base Class ---

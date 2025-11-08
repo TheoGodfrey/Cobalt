@@ -135,7 +135,9 @@ class BehaviorFactory:
                  mission_state: MissionState, 
                  hal: HAL,
                  mqtt: MqttClient,
-                 drone_id: str) -> BaseBehavior:
+                 drone_id: str,
+                 config: Dict[str, Any],
+                 drone_role: str) -> BaseBehavior: # <--- FIX: ADDED drone_role (7th explicit arg)
         """
         Factory method to create a behavior instance.
         """
@@ -147,23 +149,23 @@ class BehaviorFactory:
 
         action = task.action.upper()
         
-        # MODIFIED: Pass self.config to all behaviors
+        # NOTE: All behavior constructors now take the 7 arguments defined above.
         
         if action == "EXECUTE_SEARCH":
-            return SearchBehavior(mission_state, hal, dependencies, mqtt, drone_id, self.config)
+            return SearchBehavior(mission_state, hal, dependencies, mqtt, drone_id, config, drone_role)
             
         elif action == "EXECUTE_DELIVERY":
-            return DeliveryBehavior(mission_state, hal, dependencies, mqtt, drone_id, self.config)
+            return DeliveryBehavior(mission_state, hal, dependencies, mqtt, drone_id, config, drone_role)
             
         elif action == "EXECUTE_RTH":
-            return RTHBehavior(mission_state, hal, dependencies, mqtt, drone_id, self.config)
+            return RTHBehavior(mission_state, hal, dependencies, mqtt, drone_id, config, drone_role)
         
         elif action == "EXECUTE_SACRIFICIAL_DELIVERY":
-            return SacrificialDeliveryBehavior(mission_state, hal, dependencies, mqtt, drone_id, self.config)
+            return SacrificialDeliveryBehavior(mission_state, hal, dependencies, mqtt, drone_id, config, drone_role)
         
         elif action == "IGNORE":
             # Return a behavior that does nothing but transitions to LANDING
-            return RTHBehavior(mission_state, hal, {}, mqtt, drone_id, self.config)
+            return RTHBehavior(mission_state, hal, {}, mqtt, drone_id, config, drone_role)
             
         else:
             raise ValueError(f"Unknown behavior action: {task.action}")

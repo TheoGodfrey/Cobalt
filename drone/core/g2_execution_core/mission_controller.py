@@ -11,13 +11,10 @@ from ..g2_execution_core.mission_state import (
     MissionState, MissionStateEnum, 
     MISSION_PHASE_TO_ENUM, MISSION_ENUM_TO_PHASE # <-- FIX for Bug #11
 )
-# --- NEW: Import Task for dynamic tasking ---
-from ..g1_mission_definition.phase import Task
-# --- End NEW ---
-
 from .behaviors import BehaviorFactory, BaseBehavior
 from ..cross_cutting.communication import MqttClient # <-- NEW
 from ..g4_platform_interface.vehicle_state import VehicleState # <-- NEW
+from ..g1_mission_definition.phase import Task # <-- Keep this for dynamic tasking
 
 class MissionController:
     """Generic orchestrator that executes any mission from JSON"""
@@ -65,19 +62,12 @@ class MissionController:
         
         # Track state change listeners for cleanup
         self._state_listeners = []
-    
-    # --- This method is now REMOVED (per previous fix) ---
-    # def get_my_role(self) -> str:
-    # ...
-    # --- End of REMOVED ---
 
-    # ... existing execute_mission() ...
     async def execute_mission(self):
         """Generic mission execution loop"""
         
         current_phase_key = "None" # For error logging
         next_phase_name = "None" # For error logging
-        # self.current_behavior is now a class member
         
         # --- NEW: Start the persistent MQTT listener ---
         self._mqtt_listener_task = asyncio.create_task(self._persistent_mqtt_listener())
@@ -119,14 +109,15 @@ class MissionController:
                         # This is the "default" autonomous behavior
                         task = phase.tasks[drone_role]
                         
-                        # --- MODIFIED: Pass mqtt and drone_id ---
+                        # --- MODIFIED: Pass 7 arguments correctly ---
                         self.current_behavior = self.behavior_factory.create(
-                            task, 
-                            self.mission_state, 
-                            self.flight_controller,
-                            self.mqtt,
-                            self.mqtt._client_id, # This is the drone_id
-                            self.config # <-- NEW: Pass config
+                            task,                   # 1
+                            self.mission_state,     # 2
+                            self.flight_controller, # 3
+                            self.mqtt,              # 4
+                            self.mqtt._client_id,   # 5 (drone_id)
+                            self.config,            # 6 (config)
+                            self.drone_role         # 7 (drone_role)
                         )
                         # --- End of MODIFIED ---
                         await self.current_behavior.start()
@@ -210,7 +201,7 @@ class MissionController:
                     
                     if trigger:
                         # We have a valid trigger, find the next phase
-                        next_phase_str = transitions[trigger][drone_role] # <-- MODIFIED
+                        next_phase_str = transitions[trigger][self.drone_role] # <-- MODIFIED
                         
                         next_phase_key = next_phase_str.replace("goto:", "")
                         if next_phase_key not in MISSION_PHASE_TO_ENUM:
@@ -349,7 +340,7 @@ class MissionController:
             #     print(f"[MissionController] Ignored trigger '{trigger_key}' (not valid for current phase).")
 
     # ====================================================================================
-    # NEW: Hub-Driven Control and Failsafe Logic
+    # NEW: Hub-Driven Control Logic (Simplified Failsafe Version)
     # ====================================================================================
 
     async def _execute_hub_task(self, payload: Dict[str, Any]):
@@ -357,11 +348,6 @@ class MissionController:
         Dynamically executes a task commanded by the Hub,
         replacing the current behavior without changing phase.
         """
-        # Don't accept Hub commands if we are in failsafe mode
-        if not self.mqtt.is_connected():
-            print("[MissionController] Ignoring Hub command (in failsafe).")
-            return
-            
         # Don't accept commands while transitioning
         if self._is_transitioning:
             print("[MissionController] Ignoring Hub command (transitioning).")
@@ -389,16 +375,19 @@ class MissionController:
                     
                 # 2. Create new Task object from Hub payload
                 # This bypasses the local mission.json!
+                from ..g1_mission_definition.phase import Task
                 hub_task = Task(**hub_task_data)
                 
                 # 3. Create and start new behavior
+                # FIX: Passing 7 arguments cleanly
                 self.current_behavior = self.behavior_factory.create(
                     hub_task, 
                     self.mission_state, 
                     self.flight_controller,
                     self.mqtt,
                     self.mqtt._client_id,
-                    self.config
+                    self.config,
+                    self.drone_role # <--- ARGUMENT 7
                 )
                 await self.current_behavior.start()
                 
@@ -414,61 +403,7 @@ class MissionController:
                 # This tells the main loop to re-evaluate
                 self._fired_trigger = "hub_command:new_task"
                 self._trigger_event_fired.set()
-
-
-    async def activate_hub_failsafe_continue(self):
-        """
-        Called by SafetyMonitor. Reverts to local autonomous logic.
-        """
-        # We are now autonomous, not Hub-driven
-        self.is_hub_driven = False
-        
-        async with self._transition_lock:
-            self._is_transitioning = True # Lock
-            print("[MissionController] FAILSAFE: Reverting to local mission logic.")
-            
-            try:
-                # 1. Stop current (possibly Hub-driven) behavior
-                if self.current_behavior:
-                    await self.current_behavior.stop()
-                    
-                # 2. Get the *original* task from the mission file
-                current_phase_key = MISSION_ENUM_TO_PHASE[self.mission_state.current]
-                phase = self.mission_flow.phases[current_phase_key]
-                local_task = phase.tasks[self.drone_role]
-                
-                print(f"[MissionController] FAILSAFE: Reloading local task '{local_task.action}' with strategy '{local_task.strategy}'")
-                
-                # 3. Create and start the autonomous behavior
-                self.current_behavior = self.behavior_factory.create(
-                    local_task, 
-                    self.mission_state, 
-                    self.flight_controller,
-                    self.mqtt,
-                    self.mqtt._client_id,
-                    self.config
-                )
-                await self.current_behavior.start()
-                
-            except Exception as e:
-                print(f"[MissionController] CRITICAL: Failsafe 'CONTINUE' failed: {e}")
-                self.mission_state.transition(MissionStateEnum.ABORTED)
-            finally:
-                self._is_transitioning = False # Unlock
-                # Fire a "no-op" trigger to unblock the main loop
-                self._fired_trigger = "hub_command:failsafe"
-                self._trigger_event_fired.set()
-
-    async def deactivate_hub_failsafe(self):
-        """
-        Called by SafetyMonitor when Hub reconnects.
-        The Hub's `run_optimiser_loop` will naturally
-        send a new command, which will overwrite the
-        local failsafe behavior. We just need to log it.
-        """
-        print("[MissionController] Hub reconnected. Awaiting new Hub commands.")
-        self.is_hub_driven = False # Allow Hub to take over again
-
+    
     # ====================================================================================
     # Phase-specific listeners (evolved from old wait_for_trigger)
     # ====================================================================================

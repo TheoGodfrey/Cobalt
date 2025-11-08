@@ -190,14 +190,17 @@ async def main():
             drone_role=drone_role,
             mission_active_event=mission_active_event # <-- Pass event
         )
-        
+
+        # --- REMOVED P2P Controller Initialization ---
+        # controller.p2p_controller = None # This is implicitly handled by the class now
+
         # 4. Create safety monitor SECOND
         logger.log("Initializing safety monitor...", "info")
         safety_config = config.get('safety', {})
         safety_monitor = SafetyMonitor(
             config=safety_config,
             mqtt=mqtt,
-            mission_controller=controller,  # <-- MODIFIED: Pass full controller
+            mission_controller=controller,  # <-- Keep passing full controller
             vehicle_state=vehicle_state,
             mission_active_event=mission_active_event, # <-- Pass event
             flight_controller=flight_controller, # <-- NEW
