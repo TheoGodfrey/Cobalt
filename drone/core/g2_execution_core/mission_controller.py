@@ -95,6 +95,9 @@ class MissionController:
                 async with self._transition_lock:
                     self._is_transitioning = True # Set flag to block new triggers
                     
+                    # NEW: Store the state before behavior starts for comparison later
+                    state_at_start_of_phase = self.mission_state.current 
+                    
                     # 1. Get current phase definition from JSON
                     if self.mission_state.current not in MISSION_ENUM_TO_PHASE:
                         raise ValueError(f"Current state '{self.mission_state.current.name}' has no mapping to a phase key.")
@@ -174,16 +177,19 @@ class MissionController:
                     if not self.mission_active_event.is_set():
                         print("[MissionController] Shutdown event received, exiting mission loop.")
                         break # Exit the main while loop
-                    
-                    # --- NEW: Check if Hub command is replacing behavior ---
+                        
+                    # --- FIX: Handle Hub command override and reset event for next iteration ---
                     if self._fired_trigger and self._fired_trigger.startswith("hub_command:"):
-                        # Hub commands are now handled by _handle_hub_command
-                        # which can dynamically replace self.current_behavior.
-                        # We just need to loop again.
-                        self._is_transitioning = False
-                        # We stay in the *same phase*, but with new (hub-driven) behavior
-                        continue # Skip transition logic
-                    # --- End NEW ---
+                        # Hub commands were handled by _execute_hub_task and a new behavior was started.
+                        # We clear the event and continue to the next iteration to re-setup listeners.
+                        
+                        # CRITICAL: Reset the event and flag for the next loop iteration
+                        self._trigger_event_fired.clear() 
+                        self._fired_trigger = None
+                        
+                        self._is_transitioning = False # Unlocking early
+                        continue # Loop again to re-start the (new) behavior
+                    # --- End FIX ---
 
                     # 12. Get the trigger that fired
                     trigger = self._fired_trigger
@@ -191,7 +197,7 @@ class MissionController:
                         # This could happen if a state/timeout task won the race
                         # but hadn't set self._fired_trigger yet. Find it.
                         for task in done:
-                            if task.name().startswith("state_") or task.name().startswith("timeout_"):
+                            if task.get_name().startswith("state_") or task.get_name().startswith("timeout_"): # FIX: Use get_name()
                                 try:
                                     trigger = await task # Get the result (trigger key)
                                 except asyncio.CancelledError:
@@ -211,7 +217,20 @@ class MissionController:
                         
                         self.mission_state.transition(next_phase_enum)
                     else:
-                        # This should not be reachable if transitions exist
+                        # CRITICAL FIX for Spurious Wake-Up: Check for behavior success by state change
+                        if self.mission_state.current != state_at_start_of_phase:
+                             # The behavior succeeded and transitioned the state directly (e.g., SEARCHING -> DELIVERING)
+                             print(f"[MissionController] SUCCESS: Behavior completion detected state change: {state_at_start_of_phase.name} -> {self.mission_state.current.name}. Continuing mission flow.")
+                             self._is_transitioning = False # Release lock and re-wait
+                             continue # Restart the while loop to process the new phase
+                        
+                        # FIX: Add an explicit check to continue the loop if the state is still active
+                        elif self.mission_state.current in (MissionStateEnum.SEARCHING, MissionStateEnum.DELIVERING, MissionStateEnum.RETURNING):
+                             print(f"[MissionController] WARNING: Spurious wake-up detected while active ({self.mission_state.current.name}). Re-running phase.")
+                             self._is_transitioning = False # Release lock and re-wait
+                             continue # Restart the while loop
+                             
+                        # If we are here, we woke up, but nothing changed, and we are not in an active mission phase.
                         print("[MissionController] No trigger found but loop ended. Aborting.")
                         self.mission_state.transition(MissionStateEnum.ABORTED)
                         break
@@ -333,7 +352,7 @@ class MissionController:
                     print(f"[MissionController] TRIGGER FIRED: {trigger_key}")
                     self._fired_trigger = trigger_key
                     self._trigger_event_fired.set()
-                    # TODO: Pass payload to behavior if needed
+                    # TODO: Pass payload to behavior to behavior if needed
                 else:
                     print(f"[MissionController] Trigger {trigger_key} fired, but another trigger was already processed.")
             # else:

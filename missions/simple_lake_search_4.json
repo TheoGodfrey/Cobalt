@@ -1,6 +1,6 @@
 {
   "mission_id": "lake_test_001",
-  "mission_name": "Lake Test: Search, Confirm, Deliver, RTB",
+  "mission_name": "Lake Test: Search, Deliver, RTB",
   "start_phase": "searching",
   "hub_failsafe": "RTH",
   "phases": {
@@ -13,7 +13,7 @@
         }
       },
       "transitions": {
-        "on_state:CONFIRMING": {
+        "on_state:DELIVERING": {
           "payload": "goto:delivering"
         }
       }

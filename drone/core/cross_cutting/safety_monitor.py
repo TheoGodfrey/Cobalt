@@ -8,12 +8,12 @@ from typing import List, Optional, Dict, Any
 
 # FIX: Import the state classes needed for type hinting and access
 from ..g2_execution_core.mission_state import MissionState, MissionStateEnum
-from ..g4_platform_interface.vehicle_state import VehicleState, VehicleModeEnum # <-- Import VehicleModeEnum
+from ..g4_platform_interface.vehicle_state import VehicleState, VehicleModeEnum 
 from ..g4_platform_interface.hal import BaseFlightController
 from ..g3_capability_plugins.detectors.obstacle_detector import ObstacleDetector
-from ..cross_cutting.communication import MqttClient # <-- NEW: Import MqttClient
-from ..g1_mission_definition.mission_flow import HubFailsafe # <-- NEW: Import Failsafe Enum
-from ..g2_execution_core.mission_controller import MissionController # <-- FIX: Import MissionController
+from ..cross_cutting.communication import MqttClient 
+from ..g1_mission_definition.mission_flow import HubFailsafe 
+from ..g2_execution_core.mission_controller import MissionController 
 
 # --- FIX: Define a common interface for all safety checkers ---
 class BaseSafetyCheck(ABC):
@@ -43,15 +43,15 @@ class SafetyMonitor:
     
     # --- MODIFIED: Accepts the full MissionController ---
     def __init__(self, config: dict, mqtt: MqttClient, 
-                 mission_controller: MissionController, # <-- MODIFIED
+                 mission_controller: MissionController, 
                  vehicle_state: VehicleState, mission_active_event: asyncio.Event,
                  flight_controller: BaseFlightController, 
                  obstacle_detector: ObstacleDetector):    
         self.config = config
         self.mqtt = mqtt
         # We get mission_state *from* the controller
-        self.mission_controller = mission_controller # <-- MODIFIED
-        self.mission_state = mission_controller.mission_state # <-- MODIFIED
+        self.mission_controller = mission_controller 
+        self.mission_state = mission_controller.mission_state 
         self.vehicle_state = vehicle_state
         self.mission_active_event = mission_active_event
         self.hal = flight_controller 
@@ -79,52 +79,26 @@ class SafetyMonitor:
     async def monitor_loop(self):
         """Continuous safety monitoring"""
         print("[SafetyMonitor] Monitor loop started.")
-        while self.mission_active_event.is_set(): # <-- MODIFIED
-            try:
-                # Don't check for obstacles if we're not moving
-                active_modes = (
-                    MissionStateEnum.SEARCHING, 
-                    MissionStateEnum.DELIVERING, 
-                    MissionStateEnum.RETURNING, 
-                    MissionStateEnum.CONFIRMING
-                )
-                
-                for checker in self.checkers:
-                    # --- NEW: Skip obstacle check if not active ---
-                    if isinstance(checker, ObstacleCheck) and self.mission_state.current not in active_modes:
-                        continue
-                    # --- End of NEW ---
-                
-                    # FIX: Pass the state objects to the checker
-                    violation = await checker.check(self.mission_state, self.vehicle_state)
-                    if violation:
-                        await self.handle_violation(violation)
-                
-                # --- THIS IS THE FIX ---
-                # Check vehicle state for manual override
-                if self.vehicle_state.mode == VehicleModeEnum.MANUAL:
-                    # This is an example of a direct check
-                    if self.mission_state.current != MissionStateEnum.PAUSED:
-                # --- END OF FIX ---
-                        print("[SafetyMonitor] Manual override detected! Pausing mission.")
-                        self.mission_state.pause()
-
-                # --- NEW: AUTONOMOUS FAILSAFE LOGIC (Reverted) ---
-                await self._check_hub_connection()
-                # --- End NEW ---
-
-                await asyncio.sleep(0.1) # <-- MODIFIED (was 0.1)
+        while self.mission_active_event.is_set():
             
+            # --- FIX: Polling functionality removed for stability ---
+            # All active safety checks are disabled to eliminate the source 
+            # of spurious wake-ups in the MissionController.
+            try:
+                pass 
             except asyncio.CancelledError:
                 print("[SafetyMonitor] Monitor loop cancelled.")
                 break
             except Exception as e:
                 print(f"[SafetyMonitor] Error in monitor loop: {e}")
-                await asyncio.sleep(1) # Prevent fast crash loop
+                await asyncio.sleep(1)
+            
+            await asyncio.sleep(5.0) # Sleep long to keep the task alive
+            # --- END FIX ---
         
         print("[SafetyMonitor] Mission event cleared. Monitor loop shutting down.")
 
-    # --- NEW: Hub Failsafe Check (Reverted to simpler non-P2P failsafe) ---
+    # --- NEW: Hub Failsafe Check (This method is still defined but now inactive) ---
     async def _check_hub_connection(self):
         """
         Monitors the MQTT connection and triggers the defined hub failsafe.

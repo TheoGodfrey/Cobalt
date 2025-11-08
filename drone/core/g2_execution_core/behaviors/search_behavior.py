@@ -1,5 +1,5 @@
 import asyncio
-import time # <-- NEW
+import time 
 from .base import BaseBehavior
 from ..mission_state import MissionStateEnum
 from ...g3_capability_plugins.detectors.base import Detection
@@ -184,26 +184,31 @@ class SearchBehavior(BaseBehavior):
             sensing_task = asyncio.create_task(_sensing_loop())
             flight_task = asyncio.create_task(_flight_loop())
             
+            # Wait for either task to finish (e.g., target found)
             done, pending = await asyncio.wait(
                 {sensing_task, flight_task}, 
                 return_when=asyncio.FIRST_COMPLETED
             )
             
+            # Cancel the remaining tasks
             for task in pending:
                 task.cancel()
 
+            # Wait for them to truly finish
             await asyncio.gather(sensing_task, flight_task, return_exceptions=True)
             
-            if _target_found_event.is_set():
-                if self.mission_state.current not in (MissionStateEnum.ABORTED, MissionStateEnum.NAVIGATION_FAILURE):
-                    self.mission_state.transition(MissionStateEnum.CONFIRMING)
-            
-            print("[SearchBehavior] Concurrent run finished.")
-
         except asyncio.CancelledError:
-            print("[SearchBehavior] Canceled.")
+            # Catch top-level cancellation from MissionController. The finally block handles success.
+            print("[SearchBehavior] Canceled by external event.")
         except Exception as e:
             print(f"[SearchBehavior] CRITICAL ERROR in run setup: {e}")
             self.mission_state.transition(MissionStateEnum.ABORTED)
         finally:
+            # THIS IS THE CRITICAL FIX: Ensure state transition logic runs on exit, even if cancelled.
+            if _target_found_event.is_set():
+                if self.mission_state.current not in (MissionStateEnum.ABORTED, MissionStateEnum.NAVIGATION_FAILURE):
+                    # FIX: Transition directly to DELIVERING (to match JSON logic for immediate transition)
+                    self.mission_state.transition(MissionStateEnum.DELIVERING) 
+            
+            print("[SearchBehavior] Concurrent run finished.")
             print("[SearchBehavior] Exiting run method.")
