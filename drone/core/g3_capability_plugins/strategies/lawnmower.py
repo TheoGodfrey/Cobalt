@@ -29,7 +29,7 @@ class LawnmowerStrategy(BaseStrategy):
         self._width = config.get("width", 1000)
         self._height = config.get("height", 1000)
         self._step = config.get("step", 50)
-        self._altitude = config.get("altitude", -50)
+        self._altitude = config.get("altitude", 50)
         
         self._max_y = self._origin_y + self._height
         self._min_y = self._origin_y
@@ -49,19 +49,19 @@ class LawnmowerStrategy(BaseStrategy):
     async def next_waypoint(self) -> Waypoint:
         """
         Calculates the next corner point in the lawnmower grid.
+        
+        Raises:
+            StopIteration: If the pattern is complete.
         """
         # Simulate calculation time
         await asyncio.sleep(0.1)
         
-        # --- FIX: Re-implemented lawnmower logic ---
+        # --- FIX: Signal StopIteration when complete ---
         
         # Check if we are done with all lanes
         if self._current_x > self._max_x:
-            print("[LawnmowerStrategy] Pattern complete. Restarting...")
-            self._current_x = self._origin_x
-            self._current_y = self._origin_y
-            self._direction = 1
-            self._state = 0 # Start by moving along Y
+            print("[LawnmowerStrategy] Pattern complete. Signaling StopIteration.")
+            raise StopIteration("Search area completely covered.")
 
         if self._state == 0:
             # --- State 0: Move along the Y-axis (North or South leg) ---
@@ -85,16 +85,6 @@ class LawnmowerStrategy(BaseStrategy):
             # Move to the next lane
             self._current_x += self._step
             
-            # If this step takes us out of bounds, restart
-            if self._current_x > self._max_x:
-                print("[LawnmowerStrategy] Pattern complete. Restarting...")
-                self._current_x = self._origin_x
-                self._current_y = self._origin_y
-                self._direction = 1
-                self._state = 0
-                # Return the home position as the last point
-                return Waypoint(x=self._origin_x, y=self._origin_y, z=self._altitude)
-
             # Create the waypoint for the start of the next leg
             wp = Waypoint(x=self._current_x, y=self._current_y, z=self._altitude)
 

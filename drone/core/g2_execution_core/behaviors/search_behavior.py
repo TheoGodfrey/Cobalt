@@ -99,6 +99,11 @@ class SearchBehavior(BaseBehavior):
                     if detection and not _target_found_event.is_set():
                         await self._handle_detection(detection)
                         _target_found_event.set()
+                        
+                        # CRITICAL: Transition state to DELIVERING on detection.
+                        # This state change is what the MissionController is listening for 
+                        # to stop the overall behavior.
+                        self.mission_state.transition(MissionStateEnum.DELIVERING)
                         break
                     
                     # --- NEW: Report "Misses" for Object Permanence ---
@@ -143,24 +148,44 @@ class SearchBehavior(BaseBehavior):
                         await asyncio.sleep(1)
                         continue
                     
-                    # NOTE: This loop now receives new "goto_target" commands
-                    # from the Hub's optimiser, overriding the local strategy.
-                    waypoint = await self.strategy.next_waypoint()
+                    # --- FIX: Check for Strategy Completion (StopIteration) ---
+                    try:
+                        waypoint = await self.strategy.next_waypoint()
+                    except StopIteration:
+                        print("[SearchBehavior] Strategy exhausted (search complete). Firing mission transition event.")
+                        # This fires the MQTT event, which the MissionController will catch and map to a transition (e.g., RTH).
+                        await self.mqtt.publish(
+                            "fleet/events/search_exhausted", 
+                            {"drone_id": self.drone_id, "event_type": "search_exhausted"}
+                        )
+                        _target_found_event.set() # Signal completion to stop sensing task
+                        break # Exit flight loop
+                    # --- End of FIX ---
+
                     print(f"[SearchBehavior] Moving to waypoint: ({waypoint.x}, {waypoint.y}, {waypoint.z})")
 
                     goto_task = asyncio.create_task(self.hal.goto(waypoint))
                     event_wait_task = asyncio.create_task(_target_found_event.wait())
                     
+                    # --- CRITICAL FIX: Ensure the race is between goto completion and event firing ---
                     done, pending = await asyncio.wait(
                         {goto_task, event_wait_task}, 
                         return_when=asyncio.FIRST_COMPLETED
                     )
 
                     if event_wait_task in done:
-                        print("[SearchBehavior] Target found during flight. Cancelling goto.")
+                        # Target found or Strategy exhausted during flight. Cancel the in-progress goto.
+                        print("[SearchBehavior] Target found or Strategy exhausted. Cancelling goto.")
                         goto_task.cancel()
+                        
+                        # Wait for cancellation to complete before proceeding to 'break'
+                        try:
+                            await goto_task
+                        except asyncio.CancelledError:
+                            pass
                         break 
 
+                    # If we reach here, the goto_task completed first (not the event_wait_task)
                     arrival_success = await goto_task
                     
                     if not arrival_success:
@@ -184,7 +209,7 @@ class SearchBehavior(BaseBehavior):
             sensing_task = asyncio.create_task(_sensing_loop())
             flight_task = asyncio.create_task(_flight_loop())
             
-            # Wait for either task to finish (e.g., target found)
+            # Wait for either task to finish (e.g., target found or pattern complete)
             done, pending = await asyncio.wait(
                 {sensing_task, flight_task}, 
                 return_when=asyncio.FIRST_COMPLETED
@@ -204,11 +229,5 @@ class SearchBehavior(BaseBehavior):
             print(f"[SearchBehavior] CRITICAL ERROR in run setup: {e}")
             self.mission_state.transition(MissionStateEnum.ABORTED)
         finally:
-            # THIS IS THE CRITICAL FIX: Ensure state transition logic runs on exit, even if cancelled.
-            if _target_found_event.is_set():
-                if self.mission_state.current not in (MissionStateEnum.ABORTED, MissionStateEnum.NAVIGATION_FAILURE):
-                    # FIX: Transition directly to DELIVERING (to match JSON logic for immediate transition)
-                    self.mission_state.transition(MissionStateEnum.DELIVERING) 
-            
             print("[SearchBehavior] Concurrent run finished.")
             print("[SearchBehavior] Exiting run method.")

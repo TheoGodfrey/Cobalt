@@ -44,17 +44,15 @@ detectors:
       canny_threshold2: 200
 
   # --- Config for standalone ObstacleDetector ---
-  obstacle_detector:
-    min_distance_m: 2.0 # Used by SafetyMonitor, not plugin
 
 strategies:
   lawnmower:
     origin_x: 0
     origin_y: 0
-    width: 1000      # meters (total width of area on X-axis)
-    height: 1000     # meters (total height of area on Y-axis)
+    width: 500      # meters (total width of area on X-axis)
+    height: 500     # meters (total height of area on Y-axis)
     step: 50         # meters (distance between N-S legs)
-    altitude: -50    # meters (50m altitude)
+    altitude: 50  # meters (50m altitude)
 
 actuators:
   payload_dropper:
