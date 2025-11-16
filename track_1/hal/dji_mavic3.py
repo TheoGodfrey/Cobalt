@@ -1,4 +1,9 @@
 # shared/hal/dji_mavic3.py
+# track1_shipping/hal.py
+#
+# Contains the DJIMavic3 class, moved from shared/hal/dji_mavic3.py
+# All imports are standard libraries.
+
 import time
 import random
 from typing import Dict, Any, Tuple

@@ -2,79 +2,180 @@
 
 import time
 import threading
-from .mob_rescue import MOBRescue # Use relative import for type hint
+from typing import Optional, Dict, Any
 
-class RemoteControlInterface:
-    """[STUB] Represents the operator's RC joystick/GCS."""
-    def __init__(self, port=8080):
-        print(f"[STUB] Remote control interface listening on port {port}.")
+from track_1.mob_rescue import MOBRescue
 
-    def operator_requests_control(self):
-        """[STUB] Check if operator is trying to take over."""
-        # Always return False for this simple demo
-        return False
 
-    def operator_releases_control(self):
-        """[STUB] Check if operator has given control back."""
-        return True
+class SatelliteUplink:
+    """
+    Simulates a high-latency satellite command uplink (Starlink).
+    """
+    def __init__(self, port: int):
+        print(f"[SATCOM] Uplink active on port {port}. Latency: 0.5s")
+        self.command_queue = [] 
+        self.LATENCY_SECONDS = 0.5
+        # Add a lock for thread-safe command queuing
+        self._lock = threading.Lock() 
 
-    def get_command(self):
-        """[STUB] Get manual flight commands."""
-        return "HOVER"
+    def check_for_commands(self) -> Optional[Dict[str, Any]]:
+        """
+        Simulates a high-latency check for new commands.
+        This is a BLOCKING call.
+        """
+        # 1. Simulate satellite link latency
+        time.sleep(self.LATENCY_SECONDS) 
+        
+        # 2. Check for a command
+        with self._lock:
+            if self.command_queue:
+                command = self.command_queue.pop(0) 
+                print(f"[SATCOM] 🛰️  Command received: {command}")
+                return command
+        return None
+
+    def send_command(self, command: Dict[str, Any]):
+        """
+        A helper method for testing. Call this from another thread
+        to simulate an operator sending a command.
+        """
+        print(f"[Operator] Sending command via SATCOM: {command}")
+        with self._lock:
+            self.command_queue.append(command)
 
 
 class RemoteControlWrapper:
     """
-    Wrap any mission with remote control capability.
-    Operator can take control at any time.
+    [UPDATED]
+    Wraps the mission and runs a parallel "satellite listener" thread.
+    This listener is now a simple state machine that can be in
+    "AUTONOMOUS" or "MANUAL" mode.
     """
-    def __init__(self, mission: MOBRescue, control_interface: RemoteControlInterface):
+    def __init__(self, mission: 'MOBRescue', port: int):
         self.mission = mission
-        self.control = control_interface
-        self.operator_active = False
+        self.satellite_link = SatelliteUplink(port=port)
+        
+        # --- NEW STATE MACHINE ---
+        self.control_mode = "AUTONOMOUS" # AUTONOMOUS | MANUAL
+        
+        self._listener_should_run = True
+        self._listener_thread = None
+        self._mission_thread = None
 
     def execute(self, *args, **kwargs):
-        """Execute mission with operator override capability."""
+        """
+        Execute mission and start satellite listener in parallel.
+        """
         
-        # Start mission in background thread
-        mission_thread = threading.Thread(
+        # 1. Start satellite listener in background
+        self._listener_should_run = True
+        self._listener_thread = threading.Thread(
+            target=self._satellite_command_loop
+        )
+        self._listener_thread.start()
+        print("[RC] Satellite listener thread started.")
+
+        # 2. Start mission in its own background thread
+        self._mission_thread = threading.Thread(
             target=self.mission.execute,
             args=args,
             kwargs=kwargs
         )
-        mission_thread.start()
+        self._mission_thread.start()
         print("[RC] Mission thread started.")
 
-        # Monitor for operator override in main thread
-        while mission_thread.is_alive():
-            if self.control.operator_requests_control():
-                self._pause_mission()
-                self._operator_control()
-                self._resume_mission()
-
-            time.sleep(0.1)
-        
+        # 3. Wait for mission to finish
+        self._mission_thread.join()
         print("[RC] Mission thread finished.")
+
+        # 4. Stop the satellite listener
+        self._listener_should_run = False
+        self._listener_thread.join()
+        print("[RC] Satellite listener thread stopped.")
+        
         return self.mission.mission_result
 
-    def _pause_mission(self):
-        """Pause autonomous mission."""
-        print("⏸️  Operator taking control! Pausing mission.")
-        self.operator_active = True
-        self.mission.mission_result = {"status": "paused_by_operator"}
-        self.mission.drone.goto(self.mission.drone.get_position()) # Tell drone to hover
+    def _satellite_command_loop(self):
+        """
+        [UPDATED] This is now the *only* loop that polls the satellite.
+        It behaves differently based on self.control_mode.
+        """
+        while self._listener_should_run:
+            # This call blocks for ~0.5 seconds
+            command = self.satellite_link.check_for_commands()
+            
+            if not command:
+                continue
+            
+            # --- Handle commands based on mode ---
+            if self.control_mode == "AUTONOMUS":
+                self._handle_autonomous_commands(command)
+            elif self.control_mode == "MANUAL":
+                self._handle_manual_commands(command)
 
-    def _operator_control(self):
-        """Hand control to operator."""
-        print("[RC] Operator has control.")
-        while not self.control.operator_releases_control():
-            cmd = self.control.get_command()
-            # self.mission.drone.execute_manual_command(cmd)
-            time.sleep(0.05)
-        print("[RC] Operator released control.")
+    def _handle_autonomous_commands(self, command: Dict[str, Any]):
+        """
+        Handles commands while the mission is running itself.
+        """
+        if command['type'] == 'ABORT_RTH':
+            print("[RC] Received ABORT_RTH command! Triggering abort.")
+            self.mission.abort_mission()
+        
+        elif command['type'] == 'GOTO_WAYPOINT':
+            # Operator can redirect the *entire* mission
+            lat = command['lat']
+            lon = command['lon']
+            alt = command['alt']
+            print(f"[RC] Received GOTO command! Aborting mission and flying to {lat, lon}@{alt}m.")
+            self.mission.abort_and_redirect(
+                position=(lat, lon), 
+                altitude=alt
+            )
+        
+        elif command['type'] == 'PAUSE':
+            # --- This is the handoff ---
+            print("[RC] Received PAUSE command! Switching to MANUAL control.")
+            self.control_mode = "MANUAL"
+            self.mission.pause_mission() # Tell mission to just hover
+            print("[RC] Operator has manual (satellite) control.")
+            
+    def _handle_manual_commands(self, command: Dict[str, Any]):
+        """
+        Handles commands while the operator is in manual control.
+        """
+        # --- Command: Go to a specific GPS point ---
+        if command['type'] == 'GOTO_WAYPOINT':
+            lat = command['lat']
+            lon = command['lon']
+            alt = command['alt']
+            print(f"[RC] Manual Control: Flying to {lat, lon}@{alt}m.")
+            # Directly command the drone (using the HAL)
+            self.mission.drone.goto(
+                position=(lat, lon), 
+                altitude=alt
+            )
+            print("[RC] Manual move complete. Awaiting next command.")
 
-    def _resume_mission(self):
-        """Resume autonomous mission."""
-        print("▶️  Resuming autonomous mission (NOT IMPLEMENTED IN THIS STUB).")
-        self.operator_active = False
-        self.mission.mission_result = {"status": "aborted_by_operator"}
+        # --- Command: Perform a specific action ---
+        elif command['type'] == 'MANUAL_CMD':
+            cmd = command.get('cmd')
+            print(f"[RC] Got manual action: {cmd}")
+            if cmd == "DROP_PAYLOAD":
+                self.mission.drone.drop_payload()
+            elif cmd == "STROBE_ON":
+                self.mission.drone.set_strobe(True)
+            elif cmd == "STROBE_OFF":
+                self.mission.drone.set_strobe(False)
+            
+        # --- Command: Exit manual mode and resume mission ---
+        elif command['type'] == 'RESUME_MISSION':
+            # --- This is the handoff back ---
+            print("[RC] Operator released control. Resuming autonomous logic.")
+            self.control_mode = "AUTONOMOUS"
+            self.mission.resume_mission() # Tell mission to un-pause
+        
+        # --- Command: Abort from manual mode ---
+        elif command['type'] == 'ABORT_RTH':
+            print("[RC] Received ABORT_RTH command! Aborting manual control.")
+            self.control_mode = "AUTONOMOUS" # (Will be aborted anyway)
+            self.mission.abort_mission() # This will trigger RTH

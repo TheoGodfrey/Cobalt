@@ -1,21 +1,19 @@
-# run_mission.py
+# run.py
 #
 # [UPDATED]
-# This is now a command-line executable for the Track 1 mission.
-# It parses drone_id and role from the command line and starts
-# the mission immediately.
+# This is now the main executable, living in the project root.
+# It correctly imports from the 'track_1' package.
 
 import argparse
 import sys
 
-# Import Track 1 components
-from track1_shipping.mob_rescue import MOBRescue, SearchArea
-from track1_shipping.ship_config import ShipConfig
-from track1_shipping.remote_control import RemoteControlWrapper, RemoteControlInterface
-
-# Import Shared components
-from shared.hal.dji_mavic3 import DJIMavic3
-from shared.sensors.thermal_camera import ThermalCamera
+# Import Track 1 components from the 'track_1' package
+from track_1.mob_rescue import MOBRescue, SearchArea
+from track_1.ship_config import ShipConfig
+from track_1.remote_control import RemoteControlWrapper
+from track_1.hal.dji_mavic3 import DJIMavic3
+from track_1.sensors.thermal_camera import ThermalCamera
+from track_1.safety.safety_monitor import SafetyMonitor 
 
 def main():
     """
@@ -56,8 +54,7 @@ def main():
         # The drone_id IS the connection string
         drone = DJIMavic3(connection_string=args.drone_id)
         
-        # For USB-based cameras, the ID might be the same as the drone
-        # For network cameras, the ThermalCamera class will have the stream URL
+        # The ThermalCamera class will find its own stream
         camera = ThermalCamera(drone)
         
         if camera.cap is None:
@@ -79,25 +76,30 @@ def main():
         role=args.role
     )
 
-    # 5. Add remote control capability (stub)
-    # Use different ports for each role to avoid conflicts
-    # if running on the same machine.
+    # 5. Add remote control capability
+    # Use different ports for each role
     rc_port = 8080 if args.role == "deliver" else 8081
     print(f"[Launcher] Remote Control interface on port {rc_port}")
-    control_interface = RemoteControlInterface(port=rc_port)
-    mission_with_remote = RemoteControlWrapper(mission, control_interface)
+    mission_with_remote = RemoteControlWrapper(
+        mission=mission,
+        port=rc_port
+    )
 
-    # 6. Define search area
+    # 6. Create and start Safety Monitor
+    safety_monitor = SafetyMonitor(drone=drone, mission=mission)
+    safety_monitor.start()
+
+    # 7. Define search area
     # This will be based on the drone's *stubbed* starting position
     # In a real app, this would come from the ship's GCS.
     start_lat, start_lon = drone.get_position()
-    radius_deg = ship.search_radius / 111000 # Rough conversion
+    radius_deg = ship.search_radius / 111111.0 # Rough conversion
     search_area = SearchArea(
         lat_bounds=(start_lat - radius_deg, start_lat + radius_deg),
         lon_bounds=(start_lon - radius_deg, start_lon + radius_deg)
     )
-
-    # 7. Execute
+    
+    # 8. Execute
     print(f"\n{'='*50}")
     print(f"LAUNCHING MISSION")
     print(f"   Drone ID: {args.drone_id}")
@@ -108,7 +110,10 @@ def main():
     # This is the main blocking call that runs the whole mission
     result = mission_with_remote.execute(search_area)
 
-    # 8. Print final result
+    # 9. Clean up the Safety Monitor
+    safety_monitor.stop()
+
+    # 10. Print final result
     print(f"\n{'='*50}")
     print(f"MISSION COMPLETE (Drone: {args.drone_id})")
     print(f"   Final Status: {result['status']}")
