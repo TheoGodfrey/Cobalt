@@ -41,11 +41,12 @@ class MockHAL:
         self.last_update = time.time()
         self.home_location = np.array([0.0, 0.0, -5.0]) # Target for RTL
 
-    def connect(self):
+    def _connect_sync(self):
+        # --- FIX: Renamed to avoid collision with async connect() ---
         print("[MockHAL] Connected to virtual drone (3D Physics).")
 
     async def connect(self):
-        self.connect()
+        self._connect_sync()
         return True
 
     def get_state(self):

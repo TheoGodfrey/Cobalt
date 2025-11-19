@@ -26,19 +26,22 @@ class ProbabilityModel:
             self.grid /= total
         else:
             # --- FIX: Re-initialize if probability collapses ---
-            # This prevents the solver from getting zero gradients forever
             self.grid.fill(1.0 / self.grid.size)
 
     def evolve(self, dt, drift_vector_ms=(0.0, 0.0, 0.0)):
+        # --- FIX: Robustly handle both Tuples and Numpy Arrays ---
+        drift = np.array(drift_vector_ms)
+        
         sigma_xy = np.sqrt(2 * self.DIFFUSION_XY * dt) / self.res
         sigma_z = np.sqrt(2 * self.DIFFUSION_Z * dt) / self.res
         
         self.grid = gaussian_filter(self.grid, sigma=(sigma_z, sigma_xy, sigma_xy))
         
-        if drift_vector_ms != (0.0, 0.0, 0.0):
-            sx = (drift_vector_ms[0] * dt) / self.res
-            sy = (drift_vector_ms[1] * dt) / self.res
-            sz = (drift_vector_ms[2] * dt) / self.res
+        # Check if the drift vector has any non-zero elements
+        if np.any(drift != 0):
+            sx = (drift[0] * dt) / self.res
+            sy = (drift[1] * dt) / self.res
+            sz = (drift[2] * dt) / self.res
             
             # Shift (z, y, x)
             self.grid = shift(self.grid, shift=(sz, sy, sx), mode='nearest')

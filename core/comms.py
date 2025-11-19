@@ -46,6 +46,12 @@ class Comms:
     def pub(self, topic, data):
         """Publish data to a topic."""
         try:
+            # --- AUTO-TIMESTAMP INJECTION ---
+            # If data is a dict and missing a timestamp, add it automatically.
+            if isinstance(data, dict) and 't' not in data:
+                data['t'] = time.time()
+            # --------------------------------
+
             # Handle numpy serialization
             def default(o):
                 if isinstance(o, np.ndarray):
