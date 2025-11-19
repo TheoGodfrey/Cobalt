@@ -1,9 +1,0 @@
-safety:
-  battery_low_threshold: 25.0
-  geofence_path: "drone/config/geofence.json" # (File doesn't exist, but shows setting)
-  
-  # --- NEW: Config for ObstacleCheck ---
-  obstacle_check:
-    enabled: true
-    min_distance_m: 2.0 # Critical stop distance
-    action: "STOP_MOVEMENT"
