@@ -6,7 +6,7 @@ import numpy as np
 from pathlib import Path
 
 # Import Core
-from core.state.worldstate import WorldState
+from core.state.world_state import WorldState
 from core.maths.solver import ProbabilisticSolver
 from core.mission.manager import MissionManager
 from core.comms import Comms

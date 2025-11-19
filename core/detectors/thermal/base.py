@@ -1,30 +1,16 @@
+
 from abc import ABC, abstractmethod
-import numpy as np
+from dataclasses import dataclass, field
+from typing import Tuple, Any
 
-class BaseEquation(ABC):
-    def __init__(self, world_state, config):
-        self.world = world_state
-        self.config = config
-        
+@dataclass
+class DetectionResult:
+    label: str
+    confidence: float
+    bbox: Tuple[int, int, int, int] # (x, y, w, h)
+    metadata: Any = field(default_factory=dict)
+    
+class BaseDetector(ABC):
     @abstractmethod
-    def compute_gradient(self, drone_state): 
+    def process_frame(self, frame_data): 
         pass
-
-    # FIX: Added default debug implementation
-    def compute_gradient_debug(self, drone_state):
-        """
-        Wrapper for compute_gradient that returns a default debug object.
-        Ensures compatibility with Solver.solve().
-        """
-        gradient = self.compute_gradient(drone_state)
-        
-        # Import locally to avoid circular dependency issues
-        from ..solver import SolverDebug
-        
-        debug = SolverDebug(
-            gradient_travel=gradient,
-            gradient_search=np.zeros(3),
-            gradient_wind=np.zeros(3),
-            cost_value=0.0
-        )
-        return gradient, debug
