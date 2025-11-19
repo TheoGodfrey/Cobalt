@@ -1,20 +1,26 @@
-import argparse
-import yaml
-import time
 import asyncio
+import argparse
 import numpy as np
+import yaml
 import math
-import signal
-import sys
-from pathlib import Path
+import time
 
-# Import Core
-from core.state.world_state import WorldState
-from core.maths.solver import ProbabilisticSolver
-from core.mission.manager import MissionManager
+# Core Infrastructure
+from core.bus import MessageBus
+from core.supervisor import ServiceSupervisor
 from core.comms import Comms
-from drone.safety.safety_monitor import SafetyMonitor
+from core.types import DroneState, TelemetryMessage
+
+# Logic & State
+from core.state.world_state import WorldState
+from core.mission.manager import MissionManager
+from core.maths.solver import ProbabilisticSolver
+
+# Hardware & Safety
 from drone.hardware.hal import MockHAL, MavlinkHAL
+from drone.safety.safety_monitor import SafetyMonitor
+
+# Vision (The parts we removed earlier)
 from drone.hardware.camera import CameraSensor
 from drone.hardware.lidar import LidarSensor
 from core.detectors.thermal.manager import DetectorManager
@@ -24,40 +30,30 @@ from core.maths.georeference import Georeferencer
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--id", required=True)
-    parser.add_argument("--mission", default="missions/MOB_mission.yaml")
     parser.add_argument("--hal", default="mock")
+    parser.add_argument("--mission", default="missions/MOB_mission.yaml")
     args = parser.parse_args()
 
-    print(f"[Main] Starting COBALT Drone: {args.id}", flush=True)
+    print(f"[Main] Initializing Drone {args.id}...")
 
-    base_path = Path(__file__).parent.parent
+    # 1. Infrastructure (The Nervous System)
+    bus = MessageBus()
+    supervisor = ServiceSupervisor(bus)
     
-    # --- LOAD CONFIG ---
-    try:
-        with open(base_path / "config/fleet_config.yaml") as f: fleet_conf = yaml.safe_load(f)
-        my_conf = fleet_conf.get('fleet', {}).get(args.id, {'connection': 'udp:127.0.0.1:14550'})
-        my_role = my_conf.get('type', 'scout') 
-    except FileNotFoundError:
-        fleet_conf = {'world': {}}
-        my_conf = {'connection': 'udp:127.0.0.1:14550'}
-        my_role = 'scout'
-
+    # 2. State & Configuration (The Brain)
+    world = WorldState()
+    world.my_id = args.id
+    
     try:
         with open(args.mission) as f: mission_plan = yaml.safe_load(f)
-    except FileNotFoundError:
-        print(f"[Main] CRITICAL: Mission file {args.mission} not found.", flush=True)
-        return
+        manager = MissionManager(mission_plan, world, ProbabilisticSolver(), SafetyMonitor(world))
+    except Exception as e:
+        print(f"[Main] Error loading mission: {e}")
+        manager = None
 
-    # --- INITIALIZE ---
-    world = WorldState(fleet_conf.get('world'))
-    world.my_id = args.id 
-    world.fleet_positions = {} 
-
-    solver = ProbabilisticSolver(config={'max_speed_xy': 20.0})
-    safety = SafetyMonitor(world, config={'min_altitude': 5.0})
-    
+    # 3. Hardware (The Body)
     if args.hal == "mavlink":
-        hal = MavlinkHAL(my_conf['connection'])
+        hal = MavlinkHAL("udp:127.0.0.1:14550")
         camera = CameraSensor(mode="real")
         lidar = LidarSensor(mode="real")
     else:
@@ -65,143 +61,153 @@ async def main():
         camera = CameraSensor(mode="mock")
         lidar = LidarSensor(mode="mock")
 
-    detector_manager = DetectorManager()
-    detector_manager.add_detector(ColorBlobDetector(color_range="orange"))
-    georef = Georeferencer(fov_deg_x=60.0)
-    
-    # --- INTERRUPT HANDLERS ---
-    
-    def handle_rtl(signum, frame):
-        """Interrupt: Return to Base"""
-        print(f"\n[{args.id}] INTERRUPT: RETURNING TO BASE (RTL).", flush=True)
-        hal.return_to_launch()
+    # Shared Objects
+    solver = ProbabilisticSolver() # Control Math
+    safety = SafetyMonitor(world)  # Safety Limits
+    comms = Comms(args.id, bus)    # Radio
 
-    def handle_land(signum, frame):
-        """Interrupt: Soft Landing Here"""
-        print(f"\n[{args.id}] INTERRUPT: SOFT LANDING INITIATED.", flush=True)
-        hal.land()
-        # Note: We do NOT sys.exit() here. We let the loop run to manage the descent.
-
-    def emergency_kill(signum, frame):
-        """Interrupt: Hard Kill (Ctrl+C)"""
-        print(f"\n[{args.id}] INTERRUPT: EMERGENCY KILL (SIGINT).", flush=True)
-        hal.land() # Try to command land first
-        sys.exit(0)
-
-    # Register Signals (Check for Windows compatibility)
-    signal.signal(signal.SIGINT, emergency_kill)
-    signal.signal(signal.SIGTERM, emergency_kill)
-    
-    if hasattr(signal, 'SIGUSR1'):
-        signal.signal(signal.SIGUSR1, handle_rtl)
-    if hasattr(signal, 'SIGUSR2'):
-        signal.signal(signal.SIGUSR2, handle_land)
-
-    # --- COMMS & MISSION ---
-    comms = Comms(args.id)
-
-    manager = MissionManager(
-        plan=mission_plan,
-        world=world,
-        solver=solver,
-        safety=safety,
-        my_role=my_role
-    )
-
-    await hal.connect()
-    comms.connect()
-
-    loop = asyncio.get_running_loop()
-
-    def safe_update_telemetry(msg):
-        if msg['id'] != args.id:
-            world.fleet_positions[msg['id']] = np.array(msg['pos'])
-
-    def safe_update_target(msg):
-        world.targets.update(msg['pos'], msg['label'], msg['conf'])
-    
-    def safe_mission_command(msg):
-        cmd = msg.get('command')
-        if cmd == 'NEXT_PHASE':
-            manager.trigger_manual_override()
-        elif cmd == 'RTL':
-            # Trigger the handler programmatically
-            handle_rtl(None, None)
-        elif cmd == 'LAND':
-            # Trigger the handler programmatically
-            handle_land(None, None)
-
-    comms.sub("fleet/telemetry", lambda m: loop.call_soon_threadsafe(safe_update_telemetry, m))
-    comms.sub("fleet/target", lambda m: loop.call_soon_threadsafe(safe_update_target, m))
-    comms.sub(f"fleet/{args.id}/command", lambda m: loop.call_soon_threadsafe(safe_mission_command, m))
-    comms.sub("fleet/broadcast", lambda m: loop.call_soon_threadsafe(safe_mission_command, m))
-
-    print("[Main] Auto-arming and Starting Mission...", flush=True)
-    manager.start() 
-
-    # --- MAIN LOOP ---
-    dt = 0.1
-    last_print_time = 0.0 
-
-    while True:
-        t0 = time.time()
-        state = hal.get_state()
+    # ---------------------------------------------------------
+    # SERVICE 1: Guidance (The Pilot)
+    # Priority: HIGH. Must never block.
+    # ---------------------------------------------------------
+    async def service_guidance():
+        print("[Guidance] Service Started.")
+        if manager: manager.start()
+        await hal.connect()
         
-        # --- Logic ---
-        # If we are in LAND mode (from interrupt), check if we touched down
-        if state.mode == "LAND":
-            alt = -state.position_local[2]
-            if alt < 0.2:
-                print(f"[{args.id}] Touchdown confirmed. Disarming.", flush=True)
-                # In a real script, you might sys.exit() here or wait
-                # For sim, we continue but stop printing heavily
+        while True:
+            t0 = asyncio.get_running_loop().time()
+            
+            # A. Get Strict State
+            state: DroneState = hal.get_state()
+            
+            # B. Update Mission Triggers (Did we find it?)
+            if manager: manager.check_triggers(state)
+            
+            # C. Solve for Velocity
+            raw_cmd = solver.solve(state)
+            
+            # D. Safety Filter (Dynamic Home & Geofence)
+            safe_cmd = safety.filter_velocity(raw_cmd, state)
+            
+            # E. Actuate
+            hal.send_velocity_command(safe_cmd)
+            
+            # F. Telemetry (Fire & Forget)
+            telem = TelemetryMessage(
+                id=args.id,
+                pos=state.position_local.tolist(),
+                vel=state.velocity.tolist(),
+                batt=state.battery,
+                hdg=state.heading,
+                mode=state.mode,
+                phase=manager.current_phase_idx if manager else 0,
+                posture=manager.current_posture if manager else "none"
+            )
+            await bus.publish("comms/send", {"topic": "fleet/telemetry", "payload": telem.model_dump()})
+            
+            # G. Heartbeat
+            await bus.publish("system/heartbeat", {"service": "guidance"})
+            
+            # H. Loop Timing (Strict 10Hz)
+            elapsed = asyncio.get_running_loop().time() - t0
+            await asyncio.sleep(max(0, 0.1 - elapsed))
+
+    # ---------------------------------------------------------
+    # SERVICE 2: Vision (The Co-Pilot/Observer)
+    # Priority: MEDIUM. Can run slower (e.g., 5Hz).
+    # ---------------------------------------------------------
+    async def service_vision():
+        print("[Vision] Service Started.")
         
-        if state.mode != "LAND":
-             # Only run mission logic if NOT in a landing override
+        # Initialize Detectors locally (Thread-safe)
+        detector_mgr = DetectorManager()
+        detector_mgr.add_detector(ColorBlobDetector(color_range="orange"))
+        georef = Georeferencer(fov_deg_x=60.0)
+        
+        while True:
+            t0 = time.time()
+            
+            # A. Get Data (Blocking I/O is okay here, won't stop guidance)
+            # Note: In real async, we'd use run_in_executor for heavy CV calls
             frame = camera.get_frame()
-            detections = detector_manager.process(frame)
+            state = hal.get_state() # Get latest state for georeferencing
+            
+            # B. Process
+            detections = detector_mgr.process(frame)
+            
+            # C. Georeference & Publish
             for d in detections:
+                # Simple Pinhole Model
                 cx, cy = d.bbox[0] + d.bbox[2]/2, d.bbox[1] + d.bbox[3]/2
-                ang_x = math.atan2(cx - 320, georef.f_px)
-                ang_y = math.atan2(cy - 240, georef.f_px)
-                lidar_dist = lidar.get_range_at_angle(ang_x, ang_y)
+                
+                # Get Lidar Range (Simulated raycast)
+                # ( Simplified: Center ray for now )
+                lidar_dist = lidar.get_range_at_angle(0, 0) 
+                
                 world_pos = georef.pixel_to_world(cx, cy, state, lidar_range=lidar_dist)
                 
-                if world_pos is not None and abs(world_pos[2]) < 5.0:
-                    ts = time.time()
-                    print(f"[{args.id}] [{ts:.3f}] *** CONTACT *** {d.label} at {world_pos} (Conf: {d.confidence:.2f})", flush=True)
-                    target_msg = {'t': ts, 'pos': world_pos.tolist(), 'label': d.label, 'conf': d.confidence, 'lidar_range': lidar_dist, 'id': args.id}
-                    comms.pub("fleet/target", target_msg)
-                    world.targets.update(world_pos, d.label, d.confidence)
+                if world_pos is not None:
+                    # Notify the Bus!
+                    print(f"[{args.id}] SEE: {d.label} at {world_pos}")
+                    
+                    target_msg = {
+                        'pos': world_pos.tolist(),
+                        'label': d.label,
+                        'conf': d.confidence,
+                        'id': args.id
+                    }
+                    
+                    # Publish locally (updates WorldState)
+                    # And remote (Comms will pick this up via listener if we wired it)
+                    await bus.publish("vision/detection", target_msg)
+                    await bus.publish("comms/send", {"topic": "fleet/target", "payload": target_msg})
 
-            wind_est = world.wind.get_at(state.position_local)
-            world.probability.evolve(dt, drift_vector_ms=wind_est)
-            manager.check_triggers(state)
+            # D. Heartbeat
+            await bus.publish("system/heartbeat", {"service": "vision"})
             
-            raw_cmd = solver.solve(state)
-            safe_cmd = safety.filter_velocity(raw_cmd, state)
-            hal.send_velocity_command(safe_cmd)
+            # Run at 5Hz (slower than guidance)
+            await asyncio.sleep(0.2)
+
+    # ---------------------------------------------------------
+    # SERVICE 3: Comms (The Radio Operator)
+    # ---------------------------------------------------------
+    async def service_comms():
+        await comms.run()
+
+    # ---------------------------------------------------------
+    # SERVICE 4: Listener (The Ears)
+    # Handles incoming data from the Bus
+    # ---------------------------------------------------------
+    async def service_listener():
+        # Updates Home Position if Hub moves
+        async def on_home_update(data):
+            safety.update_home(data['pos'])
         
-        # Telemetry
-        telem_packet = {
-            'id': args.id, 't': time.time(),
-            'pos': state.position_local.tolist(), 'vel': state.velocity.tolist(),
-            'hdg': math.degrees(state.heading), 'batt': state.battery,
-            'armed': state.armed, 'mode': state.mode, 
-            'phase': manager.current_phase_idx, 'posture': manager.current_posture
-        }
-        comms.pub("fleet/telemetry", telem_packet)
+        # Updates World State with detections from OTHER drones
+        async def on_network_target(data):
+            world.targets.update(data['pos'], data['label'], data['conf'])
+            
+        bus.subscribe("fleet/home", on_home_update)
+        bus.subscribe("fleet/target", on_network_target)
+        
+        while True:
+            await bus.publish("system/heartbeat", {"service": "listener"})
+            await asyncio.sleep(1.0)
 
-        if time.time() - last_print_time > 2.0:
-            last_print_time = time.time()
-            print(f"[{args.id}] Phase:{manager.current_phase_idx} | Batt:{state.battery:.0f}% | Mode:{state.mode}", flush=True)
+    # 4. Register & Launch
+    # This is where we prevent the "God Script" problem. 
+    # If Vision crashes, Guidance lives.
+    supervisor.register("comms", service_comms)
+    supervisor.register("guidance", service_guidance)
+    supervisor.register("vision", service_vision)
+    supervisor.register("listener", service_listener)
 
-        elapsed = time.time() - t0
-        if elapsed < dt:
-            await asyncio.sleep(dt - elapsed)
+    print("[Main] All Services Registered. Starting Supervisor.")
+    await supervisor.start()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        print("\n[Main] Shutting down...")

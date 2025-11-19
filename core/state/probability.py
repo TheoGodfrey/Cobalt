@@ -4,7 +4,6 @@ from scipy.ndimage import gaussian_filter, shift
 class ProbabilityModel:
     def __init__(self, width_m=2000, height_m=2000, depth_m=100, resolution=10.0):
         self.res = resolution
-        
         self.nz = int(depth_m / resolution)
         self.ny = int(height_m / resolution)
         self.nx = int(width_m / resolution)
@@ -15,22 +14,24 @@ class ProbabilityModel:
         self.DIFFUSION_XY = 0.1 
         self.DIFFUSION_Z = 0.01 
 
-        # Initialize with uniform probability
         self.grid.fill(1.0)
         self._normalize()
 
     def _normalize(self):
-        """Renormalizes the entire 3D grid so sum(P) = 1.0"""
         total = np.sum(self.grid)
         if total > 1e-9:
             self.grid /= total
         else:
-            # --- FIX: Re-initialize if probability collapses ---
             self.grid.fill(1.0 / self.grid.size)
 
     def evolve(self, dt, drift_vector_ms=(0.0, 0.0, 0.0)):
-        # --- FIX: Robustly handle both Tuples and Numpy Arrays ---
-        drift = np.array(drift_vector_ms)
+        # --- FIX: Explicit Type Conversion ---
+        # Handles both tuples (0,0,0) and numpy arrays safely to prevent crash
+        drift = np.array(drift_vector_ms, dtype=float)
+        
+        # Safety check for dimensionality
+        if drift.shape != (3,):
+            drift = np.zeros(3)
         
         sigma_xy = np.sqrt(2 * self.DIFFUSION_XY * dt) / self.res
         sigma_z = np.sqrt(2 * self.DIFFUSION_Z * dt) / self.res
@@ -38,7 +39,7 @@ class ProbabilityModel:
         self.grid = gaussian_filter(self.grid, sigma=(sigma_z, sigma_xy, sigma_xy))
         
         # Check if the drift vector has any non-zero elements
-        if np.any(drift != 0):
+        if np.any(np.abs(drift) > 0.001):
             sx = (drift[0] * dt) / self.res
             sy = (drift[1] * dt) / self.res
             sz = (drift[2] * dt) / self.res
@@ -57,11 +58,8 @@ class ProbabilityModel:
             return
 
         tan_half_fov = np.tan(np.radians(fov_angle_deg / 2.0))
-        
         z_start = min(cz_drone, self.nz - 1)
         z_end = 0 
-        
-        # Create coordinate grids 
         Y, X = np.ogrid[:self.ny, :self.nx]
         
         for z_idx in range(z_end, z_start + 1):
@@ -74,7 +72,6 @@ class ProbabilityModel:
             if r_px < 0.5: 
                 self.grid[z_idx, cy, cx] *= confidence
             else:
-                # Update cone slice
                 mask = (X - cx)**2 + (Y - cy)**2 <= r_px**2
                 self.grid[z_idx][mask] *= confidence
 
@@ -85,12 +82,9 @@ class ProbabilityModel:
         cy = int(center[1] / self.res)
         cz = int(center[2] / self.res)
         
-        if not (0 <= cx < self.nx and 0 <= cy < self.ny):
-            return
+        if not (0 <= cx < self.nx and 0 <= cy < self.ny): return
         
-        # Clamp Z to be safe
         cz = max(0, min(cz, self.nz - 1))
-
         Z, Y, X = np.ogrid[:self.nz, :self.ny, :self.nx]
         
         sigma_px = sigma / self.res
