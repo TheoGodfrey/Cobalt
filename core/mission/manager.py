@@ -12,8 +12,9 @@ class MissionManager:
         self.my_role = my_role
         self.current_phase_idx = -1
         self._dynamic_target_location = None
+        # FIX: Initialize current_posture to prevent AttributeError
+        self.current_posture = None 
 
-    # ... (start, set_role, advance_phase methods remain the same) ...
     def start(self): 
         self.advance_phase()
 
@@ -51,9 +52,6 @@ class MissionManager:
         if config_loc is None: return None
         
         # Assume config_loc is relative offset [dx, dy, dz] from Hub
-        # In a real mission file, you might add a flag like 'frame: relative'
-        # For MVP, we treat ALL mission configs as relative to Hub (0,0,0)
-        
         offset = np.array(config_loc)
         # Ensure 3D
         if len(offset) == 2: 
@@ -111,7 +109,8 @@ class MissionManager:
         equation = self._get_eq_class(eq_name)(self.world, solver_config)
         self.solver.set_equation(equation)
         
-        self.safety.update_constraints(config_to_use.get('constraints', {}))
+        # FIX: safety_monitor uses .update(), not .update_constraints()
+        self.safety.update(config_to_use.get('constraints', {}))
 
     def _get_eq_class(self, name):
         if name == "UnifiedRescue": return UnifiedRescue
@@ -124,7 +123,8 @@ class MissionManager:
         phase = self.plan['phases'][self.current_phase_idx]
         
         if phase.get('trigger') == "target_found":
-            best = self.world.targets.get_highest_confidence_target()
+            # FIX: Changed method name to match core/state/targets.py
+            best = self.world.targets.get_best_target()
             if best and best.confidence > 0.8:
                 print(f"Trigger Fired: Target Found ({best.id})")
                 self._dynamic_target_location = best.position

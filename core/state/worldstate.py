@@ -31,7 +31,8 @@ class WorldState:
         return LearnedWindField(params)
 
     def update_sensor_detection(self, detection_data):
-        track_id = self.targets.update_from_detection(
+        # FIX: Correct method call to TargetRegistry
+        track_id = self.targets.update(
             detection_data['pos'], 
             detection_data['label'], 
             detection_data['confidence']
@@ -46,7 +47,7 @@ class WorldState:
 
     def assign_roles_dynamically(self, fleet_states):
         # ... (Same as before)
-        best_target = self.targets.get_highest_confidence_target()
+        best_target = self.targets.get_best_target() # FIX: consistency check
         if not best_target or best_target.confidence < 0.8: return {}
         
         scores = {}
