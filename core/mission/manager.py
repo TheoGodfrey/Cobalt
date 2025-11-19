@@ -2,6 +2,7 @@ import numpy as np
 from core.maths.equations.rescue import UnifiedRescue
 from core.maths.equations.energy import EnergyEfficientTransit
 from core.maths.equations.transit import RapidTransit
+from core.maths.equations.tracking import DynamicTracking  # <--- Added Import
 
 class MissionManager:
     def __init__(self, plan, world, solver, safety, my_role="scout"):
@@ -12,7 +13,6 @@ class MissionManager:
         self.my_role = my_role
         self.current_phase_idx = -1
         self._dynamic_target_location = None
-        # FIX: Initialize current_posture to prevent AttributeError
         self.current_posture = None 
 
     def start(self): 
@@ -109,23 +109,63 @@ class MissionManager:
         equation = self._get_eq_class(eq_name)(self.world, solver_config)
         self.solver.set_equation(equation)
         
-        # FIX: safety_monitor uses .update(), not .update_constraints()
+        # Update safety constraints
         self.safety.update(config_to_use.get('constraints', {}))
 
     def _get_eq_class(self, name):
         if name == "UnifiedRescue": return UnifiedRescue
         if name == "EnergyEfficientTransit": return EnergyEfficientTransit
         if name == "RapidTransit": return RapidTransit
+        if name == "DynamicTracking": return DynamicTracking # <--- Registered
         raise ValueError(f"Unknown Equation: {name}")
 
-    def check_triggers(self):
-        if self.current_phase_idx < 0 or self.current_phase_idx >= len(self.plan['phases']): return
-        phase = self.plan['phases'][self.current_phase_idx]
+    def trigger_manual_override(self):
+        """Call this when an external 'NEXT_PHASE' command is received."""
+        if self.current_phase_idx >= len(self.plan['phases']): return
         
-        if phase.get('trigger') == "target_found":
-            # FIX: Changed method name to match core/state/targets.py
+        phase = self.plan['phases'][self.current_phase_idx]
+        if phase.get('trigger') == "manual_override":
+            print("[Manager] Manual Override received. Advancing Phase.")
+            self.advance_phase()
+
+    def check_triggers(self, drone_state):
+        """
+        Checks if conditions are met to advance to the next phase.
+        Must be called every loop cycle.
+        """
+        if self.current_phase_idx < 0 or self.current_phase_idx >= len(self.plan['phases']): 
+            return
+
+        phase = self.plan['phases'][self.current_phase_idx]
+        trigger_type = phase.get('trigger')
+
+        # 1. Target Found (Phase 2 -> 3)
+        if trigger_type == "target_found":
             best = self.world.targets.get_best_target()
-            if best and best.confidence > 0.8:
-                print(f"Trigger Fired: Target Found ({best.id})")
+            # Require high confidence to trigger phase change
+            if best and best.confidence > 0.85:
+                print(f"[Trigger] Target Found ({best.id}). Advancing.")
                 self._dynamic_target_location = best.position
                 self.advance_phase()
+
+        # 2. Location Reached (Phase 1 -> 2)
+        elif trigger_type == "location_reached":
+            # Extract target from the current config
+            # We look at default_behavior -> config -> target_location
+            config = phase.get('default_behavior', {}).get('config', {})
+            raw_loc = config.get('target_location')
+            
+            if raw_loc:
+                target_pos = self._resolve_location(raw_loc)
+                # Calculate 3D distance
+                dist = np.linalg.norm(target_pos - drone_state.position_local)
+                
+                # Threshold: 15 meters (allows for "arrival")
+                if dist < 15.0:
+                    print(f"[Trigger] Location Reached ({dist:.1f}m). Advancing.")
+                    self.advance_phase()
+        
+        # 3. Manual Override (Phase 3 -> End)
+        elif trigger_type == "manual_override":
+            # This is handled by event callbacks calling trigger_manual_override()
+            pass

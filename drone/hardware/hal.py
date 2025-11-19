@@ -11,8 +11,9 @@ try:
     DRONEKIT_AVAILABLE = True
 except ImportError:
     DRONEKIT_AVAILABLE = False
-    # --- FIX: Define placeholder for mavutil to prevent NameError in type hints or guards ---
     mavutil = None 
+    class VehicleMode:
+        def __init__(self, name): self.name = name
 
 @dataclass
 class DroneState:
@@ -38,6 +39,7 @@ class MockHAL:
             heading=0.0
         )
         self.last_update = time.time()
+        self.home_location = np.array([0.0, 0.0, -5.0]) # Target for RTL
 
     def connect(self):
         print("[MockHAL] Connected to virtual drone (3D Physics).")
@@ -49,20 +51,49 @@ class MockHAL:
     def get_state(self):
         return self.state
 
+    def land(self):
+        """Simulates an emergency landing command."""
+        if self.state.mode != "LAND":
+            print("[MockHAL] *** EMERGENCY LANDING INITIATED ***")
+            self.state.mode = "LAND"
+            self.state.velocity = np.array([0.0, 0.0, 1.5]) # Descend
+
+    def return_to_launch(self):
+        """Simulates a Return to Launch command."""
+        if self.state.mode != "RTL":
+            print("[MockHAL] *** RETURNING TO LAUNCH (RTL) ***")
+            self.state.mode = "RTL"
+            # Velocity will be handled in physics loop
+
     def send_velocity_command(self, vel_cmd):
         now = time.time()
         dt = now - self.last_update
         self.last_update = now
         
-        # Ensure vel_cmd is numpy array
-        vel_cmd = np.array(vel_cmd)
+        # --- MODE OVERRIDES ---
+        if self.state.mode == "LAND":
+            # Ignore input, maintain descent
+            self.state.velocity = np.array([0.0, 0.0, 1.5])
+            
+        elif self.state.mode == "RTL":
+            # Ignore input, fly to home
+            vec_to_home = self.home_location - self.state.position_local
+            dist = np.linalg.norm(vec_to_home)
+            
+            if dist < 1.0:
+                print("[MockHAL] Home Reached. Landing...")
+                self.land()
+            else:
+                # Fly towards home at 10m/s
+                direction = vec_to_home / dist
+                self.state.velocity = direction * 10.0
+        else:
+            # GUIDED mode: Accept input
+            vel_cmd = np.array(vel_cmd)
+            tau = 0.5
+            alpha = dt / (tau + dt)
+            self.state.velocity = (1 - alpha) * self.state.velocity + alpha * vel_cmd
 
-        # Simple First-Order Lag
-        tau = 0.5
-        alpha = dt / (tau + dt)
-        
-        self.state.velocity = (1 - alpha) * self.state.velocity + alpha * vel_cmd
-        
         # Integrate Position
         self.state.position_local = self.state.position_local + (self.state.velocity * dt)
         
@@ -92,33 +123,26 @@ class MavlinkHAL:
             print("[MavlinkHAL] WARNING: DroneKit not installed. Falling back to Mock behavior.")
 
     async def connect(self):
-        if not DRONEKIT_AVAILABLE:
-            return
-            
+        if not DRONEKIT_AVAILABLE: return
         print(f"[MavlinkHAL] Connecting to {self.conn_str}...")
         try:
             self.vehicle = connect(self.conn_str, wait_ready=True, timeout=60)
-            print("[MavlinkHAL] Connected to Flight Controller.")
-            
+            print("[MavlinkHAL] Connected.")
             self.vehicle.add_attribute_listener('location.local_frame', self._on_location)
             self.vehicle.add_attribute_listener('velocity', self._on_velocity)
             self.vehicle.add_attribute_listener('battery', self._on_battery)
-            
         except Exception as e:
             print(f"[MavlinkHAL] Connection Failed: {e}")
             raise
 
     def _on_location(self, vehicle, name, msg):
-        if msg:
-            self.state.position_local = np.array([msg.north, msg.east, msg.down])
+        if msg: self.state.position_local = np.array([msg.north, msg.east, msg.down])
 
     def _on_velocity(self, vehicle, name, msg):
-        if msg:
-            self.state.velocity = np.array([msg[0], msg[1], msg[2]])
+        if msg: self.state.velocity = np.array([msg[0], msg[1], msg[2]])
 
     def _on_battery(self, vehicle, name, msg):
-        if msg:
-            self.state.battery = msg.level
+        if msg: self.state.battery = msg.level
 
     def get_state(self):
         if self.vehicle:
@@ -127,21 +151,24 @@ class MavlinkHAL:
             self.state.heading = math.radians(self.vehicle.heading)
         return self.state
 
+    def land(self):
+        if not self.vehicle: return
+        print(f"[MavlinkHAL] COMMAND: LAND")
+        self.vehicle.mode = VehicleMode("LAND")
+
+    def return_to_launch(self):
+        if not self.vehicle: return
+        print(f"[MavlinkHAL] COMMAND: RTL")
+        self.vehicle.mode = VehicleMode("RTL")
+
     def send_velocity_command(self, vel_cmd):
-        # --- FIX: Guard against missing dependency ---
-        if not self.vehicle or not DRONEKIT_AVAILABLE or mavutil is None:
-            return
+        if not self.vehicle or not DRONEKIT_AVAILABLE or mavutil is None: return
+        # Safety: Only send velocity in GUIDED mode
+        if self.vehicle.mode.name not in ["GUIDED"]: return
 
         type_mask = 0b0000111111000111 
-
         msg = self.vehicle.message_factory.set_position_target_local_ned_encode(
-            0, 0, 0,
-            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-            type_mask,
-            0, 0, 0,
-            vel_cmd[0], vel_cmd[1], vel_cmd[2],
-            0, 0, 0,
-            0, 0
+            0, 0, 0, mavutil.mavlink.MAV_FRAME_LOCAL_NED, type_mask, 0, 0, 0,
+            vel_cmd[0], vel_cmd[1], vel_cmd[2], 0, 0, 0, 0, 0
         )
-
         self.vehicle.send_mavlink(msg)

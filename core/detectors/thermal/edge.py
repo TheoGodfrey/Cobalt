@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from ..base import BaseDetector, DetectionResult
+from .base import BaseDetector, DetectionResult
 
 class ThermalEdgeDetector(BaseDetector):
     def process_frame(self, frame_data):
