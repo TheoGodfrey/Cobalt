@@ -1,0 +1,85 @@
+{
+  "mission_name": "Operation Cobalt Alpha",
+  "phases": [
+    {
+      "name": "Phase 1: Global Search",
+      "description": "High-altitude probabilistic search using Unified Rescue Equation",
+      "map_initialization": {
+        "strategy": "InjectUniformPolygon",
+        "config": {
+          "vertices": [
+            [0, 0],
+            [500, 0],
+            [500, 500],
+            [0, 500]
+          ]
+        }
+      },
+      "default_behavior": {
+        "cost_equation": "UnifiedRescue",
+        "config": {
+          "cruise_speed": 15.0,
+          "risk_theta": 0.05,
+          "mc_samples": 300,
+          "decay_beta": 0.002
+        },
+        "constraints": {
+          "min_altitude": 20.0,
+          "max_altitude": 60.0,
+          
+          "min_flight_time_minutes": 5.0,
+          "battery_failsafe_action": "RTL", 
+          
+          "max_distance_from_hub": 1500.0,
+          "distance_failsafe_action": "RTL" 
+        }
+      },
+      "trigger": "target_found"
+    },
+    {
+      "name": "Phase 2: Post-Detection or Intervention",
+      "description": "Default is RTL. Postures define intercept/support.",
+      "map_initialization": {
+        "strategy": "MaintainCurrent"
+      },
+      "postures": {
+        "primary_interceptor": {
+            "cost_equation": "RapidTransit",
+            "config": {
+                "target_location": null 
+            },
+            "constraints": {
+                "min_altitude": 1.0,
+                "max_speed": 25.0
+            }
+        },
+        "supporting_tracker": {
+            "cost_equation": "EnergyEfficientTransit",
+            "config": {
+                "target_location": [0, 0, 50] 
+            },
+            "constraints": {
+                "min_altitude": 30.0
+            }
+        },
+        "rtl": {
+             "cost_equation": "RapidTransit",
+             "config": {
+                 "target_location": [0.0, 0.0, -10.0] 
+             },
+             "constraints": {
+                 "max_speed": 15.0
+             }
+        }
+      },
+      "default_behavior": {
+         # --- INTERRUPTED STATE DEFAULT: RTL ---
+         # Hub is [0,0,0]. We set a transit target to a safe altitude above hub.
+         "cost_equation": "RapidTransit",
+         "config": { "target_location": [0.0, 0.0, -10.0] }, 
+         "constraints": { "min_altitude": 5.0 }
+      },
+      "trigger": "manual_override"
+    }
+  ]
+}
