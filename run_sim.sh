@@ -13,11 +13,8 @@ if ! pgrep -x "mosquitto" > /dev/null; then
 fi
 
 # 3. Launch The System
-# We only need to launch the Hub. It will read the config and spawn the drones.
-echo "[Sim] Launching Operation Cobalt..."
+echo "[Sim] Launching Operation Cobalt (Unbuffered)..."
 echo "------------------------------------------------"
 
-python hub/main.py --mission missions/MOB_mission.yaml --mode sim
-
-# (The script will hang here because hub/main.py runs a loop. 
-#  When you Ctrl+C, the Hub intercepts it and kills the drones.)
+# Added -u to force unbuffered output so you see logs immediately
+python -u hub/main.py --mission missions/MOB_mission.yaml --mode sim

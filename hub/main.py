@@ -18,8 +18,8 @@ def main():
     parser.add_argument("--mode", default="sim", choices=["sim", "deploy"], help="Run mode")
     args = parser.parse_args()
 
-    print("[Hub] Starting Dynamic Fleet Orchestrator...")
-    print("[Hub] Interactive Mode: [r] RTL | [l] LAND | [q] QUIT")
+    print("[Hub] Starting Dynamic Fleet Orchestrator...", flush=True)
+    print("[Hub] Interactive Mode: [r] RTL | [l] LAND | [q] QUIT", flush=True)
     
     base_path = Path(__file__).parent.parent
     config_path = base_path / "config/fleet_config.yaml"
@@ -41,15 +41,16 @@ def main():
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
-    print(f"[Hub] Spawning fleet from {config_path}...")
+    print(f"[Hub] Spawning fleet from {config_path}...", flush=True)
     
     for drone_id, drone_data in fleet_conf.get('fleet', {}).items():
-        print(f"   >>> Launching {drone_id} ({drone_data.get('type', 'unknown')})...")
+        print(f"   >>> Launching {drone_id} ({drone_data.get('type', 'unknown')})...", flush=True)
         cmd = [
-            sys.executable, "drone/main.py", 
+            sys.executable, "-u", "drone/main.py",  # <--- ADDED "-u" HERE
             "--id", drone_id, "--mission", args.mission,
             "--hal", "mock" if args.mode == "sim" else "mavlink"
         ]
+        # Pass stdout/stderr to parent so we see it in the same terminal
         p = subprocess.Popen(cmd)
         drone_processes.append(p)
 
@@ -63,41 +64,33 @@ def main():
         fleet_positions[msg['id']] = np.array(msg['pos'])
     
     def on_target(msg):
+        # Print explicit confirmation when Hub receives a target
+        print(f"[Hub] TARGET RECEIVED: {msg['label']} from {msg['id']}", flush=True)
         world.targets.update(msg['pos'], msg['label'], msg['conf'])
         comms.pub("fleet/target", msg)
-        
-        best_target = world.targets.get_best_target()
-        if not best_target or best_target.confidence < 0.8: return
-
-        scores = {}
-        for did, pos in fleet_positions.items():
-            dist = np.linalg.norm(pos - best_target.position)
-            scores[did] = dist
-
-        if not scores: return
-        closest = min(scores, key=scores.get)
-        
-        # In a real mission, we might send posture commands here
-        # But we avoid spamming logic loop for now
 
     comms.sub("fleet/telemetry", on_telem)
     comms.sub("fleet/target", on_target)
 
-    print("[Hub] Fleet Airborne. Monitoring...")
+    print("[Hub] Fleet Airborne. Monitoring...", flush=True)
 
     try:
         while True:
-            # 1. Check for Keyboard Input (Non-blocking)
-            if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
-                cmd = sys.stdin.readline().strip().lower()
-                if cmd == 'r':
-                    print("[Hub] >>> BROADCAST: RETURN TO LAUNCH (RTL)")
-                    comms.pub("fleet/broadcast", {'command': 'RTL'})
-                elif cmd == 'l':
-                    print("[Hub] >>> BROADCAST: LAND IMMEDIATELY")
-                    comms.pub("fleet/broadcast", {'command': 'LAND'})
-                elif cmd == 'q':
-                    raise KeyboardInterrupt
+            # 1. Check for Keyboard Input (Non-blocking, Unix only)
+            # Wrap in try-except for Windows compatibility
+            try:
+                if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+                    cmd = sys.stdin.readline().strip().lower()
+                    if cmd == 'r':
+                        print("[Hub] >>> BROADCAST: RETURN TO LAUNCH (RTL)")
+                        comms.pub("fleet/broadcast", {'command': 'RTL'})
+                    elif cmd == 'l':
+                        print("[Hub] >>> BROADCAST: LAND IMMEDIATELY")
+                        comms.pub("fleet/broadcast", {'command': 'LAND'})
+                    elif cmd == 'q':
+                        raise KeyboardInterrupt
+            except (OSError, ValueError):
+                pass # select() fails on Windows non-sockets, ignore
             
             # 2. Monitor Processes
             for p in drone_processes:
@@ -105,7 +98,7 @@ def main():
                     print(f"[Hub] Warning: A drone process died (Exit Code: {p.returncode})")
                     drone_processes.remove(p)
             
-            time.sleep(0.1) # Fast loop for responsive input
+            time.sleep(0.1) 
             
     except KeyboardInterrupt:
         cleanup(None, None)
