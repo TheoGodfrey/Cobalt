@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 # COBALT Fleet Configuration
 
 world:
@@ -34,3 +35,34 @@ fleet:
 mqtt:
   broker: "localhost"
   port: 1883
+=======
+## Fleet topology
+# Defines all drones the hub knows about.
+# The drone/main.py --id flag must match one of these.
+fleet:
+  scout_1:
+    role: "scout"
+    hal: "simulated" # 'simulated', 'ardupilot', 'dji', 'omniverse'
+    # Hardware list to satisfy this drone's potential plugins
+    hardware:
+      - "gps"             # For lawnmower, goto_target, etc.
+      - "camera_thermal"  # For thermal_detector
+
+  scout_2:
+    role: "scout"
+    hal: "simulated"
+    # Hardware list to satisfy this drone's potential plugins
+    hardware:
+      - "gps"             # For lawnmower, goto_target, etc.
+      - "camera_thermal"  # For thermal_detector
+
+  payload_1:
+    role: "payload"
+    hal: "simulated"
+    # Hardware list to satisfy this drone's potential plugins
+    hardware:
+      - "gps"                 # For lawnmower and goto_target
+      - "dropper_mechanism"   # For payload_dropper
+      - "camera_thermal"      # NEW: Added to satisfy thermal_detector
+
+>>>>>>> Stashed changes

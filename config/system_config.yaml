@@ -1,0 +1,71 @@
+# Network configuration
+network:
+  mqtt_broker_host: "localhost" # Assumes mosquitto is running on the same machine
+  mqtt_broker_port: 1883
+  mqtt_user: null
+  mqtt_pass: null
+  
+  gcs_server_host: "0.0.0.0"
+  gcs_server_port: 8765
+
+# Simulation settings
+# Used by the 'simulated' HAL
+simulation:
+  flight_speed_ms: 10.0
+  start_lat: 44.5646
+  start_lon: -123.2821
+  target_lat: 44.5650
+  target_lon: -123.2830
+
+# Plugin specific configurations
+# These are loaded by the BehaviorFactory
+detectors:
+  thermal_detector:
+    # --- Configuration for multi-strategy detector ---
+    debug: true # Set to true to open a live "Thermal Debug" window
+    confidence: 0.95
+    min_area: 20 # Smallest pixel area to count as a detection
+    
+    # Strategy 1: Simple Threshold (finds brightest spots)
+    strategy_simple_threshold:
+      enabled: true
+      threshold: 220 # (0-255) Grayscale value to consider "hot"
+
+    # Strategy 2: Adaptive Threshold (statistical approach)
+    strategy_adaptive_threshold:
+      enabled: true
+      block_size: 25 # Pixel neighborhood size (must be odd)
+      c_value: 10     # Constant subtracted from the mean
+
+    # Strategy 3: Edge Detection (finds thermal edges)
+    strategy_edge_detection:
+      enabled: false # Off by default
+      canny_threshold1: 100
+      canny_threshold2: 200
+
+  # --- Config for standalone ObstacleDetector ---
+
+strategies:
+  lawnmower:
+    origin_x: 0
+    origin_y: 0
+    width: 500      # meters (total width of area on X-axis)
+    height: 500     # meters (total height of area on Y-axis)
+    step: 50         # meters (distance between N-S legs)
+    altitude: 50  # meters (50m altitude)
+
+actuators:
+  payload_dropper:
+    release_time_sec: 2
+
+# Safety monitor configuration is now in drone/config/safety_config.yaml
+
+# --- NEW: Camera intrinsic parameters for geolocation ---
+# These values are for a typical 640x480 camera.
+camera_intrinsics:
+  focal_length_x: 500.0
+  focal_length_y: 500.0
+  principal_point_x: 320.0
+  principal_point_y: 240.0
+  width: 640
+  height: 480

@@ -1,7 +1,0 @@
-{
-    "python-envs.defaultEnvManager": "ms-python.python:system",
-    "python-envs.pythonProjects": [],
-    "python.analysis.extraPaths": [
-        "./v_0.2/scout_drone"
-    ]
-}
