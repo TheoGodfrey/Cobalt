@@ -1,5 +1,0 @@
-Press r: Triggers Global RTL (Return to Launch).
-
-Press l: Triggers Global LAND (Soft Landing where they are).
-
-Press q: Quit.

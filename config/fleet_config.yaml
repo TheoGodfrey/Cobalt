@@ -1,47 +1,3 @@
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-# COBALT Fleet Configuration
-
-world:
-  # Search area dimensions (meters)
-  width: 2000
-  height: 2000
-  depth: 100
-  resolution: 10.0  # Grid resolution in meters
-  
-  # Wind model configuration
-  wind_model:
-    type: "LearnedWindField"
-    config:
-      roughness_length: 0.03      # Surface roughness (water = 0.03)
-      reference_height: 10.0       # Reference height for measurements
-      sigma_s: 500.0               # Spatial correlation scale (meters)
-      sigma_t: 300.0               # Temporal correlation scale (seconds)
-
-# Fleet roster
-fleet:
-  scout_1:
-    connection: "udp:127.0.0.1:14551"
-    role: "scout"
-  
-  scout_2:
-    connection: "udp:127.0.0.1:14552"
-    role: "scout"
-  
-  scout_3:
-    connection: "udp:127.0.0.1:14553"
-    role: "scout"
-
-# MQTT Broker (for inter-drone communication)
-mqtt:
-  broker: "localhost"
-  port: 1883
-=======
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
 ## Fleet topology
 # Defines all drones the hub knows about.
 # The drone/main.py --id flag must match one of these.
@@ -71,10 +27,3 @@ fleet:
       - "dropper_mechanism"   # For payload_dropper
       - "camera_thermal"      # NEW: Added to satisfy thermal_detector
 
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
