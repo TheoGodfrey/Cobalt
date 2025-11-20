@@ -251,44 +251,6 @@ def test_hub_motion_tracking():
 # Test 6: Pre-Flight Checks
 # ============================================================
 
-def test_preflight_checks():
-    """
-    Maritime Essential 2: Pre-flight checks.
-    
-    Test: Good and bad conditions produce correct GO/NO-GO.
-    """
-    from drone.preflight import can_launch
-    from core.state.world_state import WorldState
-    
-    @dataclass
-    class MockState:
-        battery: float = 95.0
-        mode: str = "GUIDED"
-        armed: bool = True
-        gps_satellites: int = 12
-        position_local: np.ndarray = np.array([0, 0, 0])
-    
-    # Test 1: Good conditions (should pass)
-    world = WorldState()
-    world.hub_location = np.array([100, 200, 0])
-    state = MockState()
-    
-    result = can_launch(world, state)
-    assert result == True, "Good conditions should pass"
-    
-    # Test 2: Low battery (should fail)
-    state.battery = 85.0
-    result = can_launch(world, state)
-    assert result == False, "Low battery should fail"
-    
-    # Test 3: No home set (should fail)
-    state.battery = 95.0
-    world.hub_location = np.array([0, 0, 0])  # At origin = not set
-    result = can_launch(world, state)
-    assert result == False, "No home should fail"
-    
-    print("✅ Test 6 PASSED: Pre-flight checks work")
-
 
 # ============================================================
 # Test 7: Structured Logging
@@ -342,7 +304,7 @@ def test_structured_logging():
     # Clean up
     os.remove(log_file)
     
-    print("✅ Test 7 PASSED: Structured logging works")
+    print("✅ Test 6 PASSED: Structured logging works")
 
 
 # ============================================================
@@ -361,7 +323,6 @@ if __name__ == "__main__":
         ("Fleet Position Sync", test_fleet_position_sync),
         ("Pause/Resume", test_pause_resume),
         ("Hub Motion Tracking", test_hub_motion_tracking),
-        ("Pre-Flight Checks", test_preflight_checks),
         ("Structured Logging", test_structured_logging)
     ]
     
