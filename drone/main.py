@@ -1,5 +1,6 @@
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 import asyncio
 import argparse
 import numpy as np
@@ -519,6 +520,131 @@ async def main():
         # --- End of FIX ---
 
 >>>>>>> Stashed changes
+=======
+"""
+Main entry point for COBALT drone client.
+Usage: python main.py --id scout_1 --mission missions/mob_search_001.json
+
+FIX for Bug #10: MissionLogger now receives drone_id parameter
+
+REFACTOR: Added hardware_list dependency injection.
+REFACTOR: Now loads and merges system_config.yaml and fleet_config.yaml.
+"""
+import asyncio
+import argparse
+from pathlib import Path
+from typing import List
+
+# Bug #4 fix: Use load_mission_file, not load_mission
+from core.g1_mission_definition.loader import load_mission_file
+from core.g1_mission_definition.parser import parse_mission_flow
+from core.g2_execution_core.mission_controller import MissionController
+
+# Bug #2 fix: Factory functions exist
+from core.g3_capability_plugins import get_detector, get_strategy, get_actuator
+from core.g3_capability_plugins.detectors.obstacle_detector import ObstacleDetector # <-- NEW
+
+# Bug #3 fix: get_flight_controller factory exists
+from core.g4_platform_interface.hal import get_flight_controller
+from core.g4_platform_interface.vehicle_state import VehicleState
+from core.g4_platform_interface.sensors.lidar import Lidar # <-- NEW
+
+from core.cross_cutting.communication import MqttClient
+from core.cross_cutting.safety_monitor import SafetyMonitor
+
+# Bug #6 fix: load_config exists
+from core.utils.config_models import load_config
+
+# Bug #10 fix: Import MissionLogger
+from core.utils.logger import MissionLogger
+
+async def main():
+    parser = argparse.ArgumentParser(
+        description='COBALT Drone Mission Controller',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    # ... existing parser arguments ...
+    parser.add_argument('--id', required=True, 
+                       help='Drone ID (e.g., scout_1, payload_1)')
+    parser.add_argument('--mission', required=True, 
+                       help='Path to mission JSON file')
+    # UPDATED: Default is now system_config.yaml
+    parser.add_argument('--config', default='config/system_config.yaml',
+                       help='Path to SYSTEM configuration file (default: config/system_config.yaml)')
+    parser.add_argument('--log-dir', default='logs',
+                       help='Directory for log files (default: logs)')
+    parser.add_argument('--max-logs', type=int, default=0,
+                       help='Maximum number of log files to keep (0 = unlimited)')
+    
+    args = parser.parse_args()
+    
+    # ====================================================================================
+    # ... existing logger setup ...
+    # ====================================================================================
+    logger = MissionLogger(
+        log_dir=args.log_dir,
+        max_logs=args.max_logs,
+        drone_id=args.id  # CRITICAL: Must pass drone_id
+    )
+    logger.log(f"Starting COBALT drone: {args.id}", "info")
+    logger.log(f"Mission file: {args.mission}", "info")
+    logger.log(f"System Config file: {args.config}", "info")
+    # ====================================================================================
+    
+    try:
+        # 1. Load configuration and mission
+        logger.log("Loading configuration...", "info")
+        
+        # --- NEW: Load and merge both config files ---
+        # Load the main system config (network, plugins, etc.)
+        system_config = load_config(args.config)
+        
+        # Find and load the fleet config (assuming it's in the same 'config' dir)
+        config_dir = Path(args.config).parent
+        fleet_config_path = config_dir / "fleet_config.yaml"
+        
+        if not fleet_config_path.exists():
+            logger.log(f"CRITICAL: fleet_config.yaml not found at {fleet_config_path}", "error")
+            raise FileNotFoundError(f"fleet_config.yaml not found at {fleet_config_path}")
+            
+        logger.log(f"Loading fleet config from {fleet_config_path}...", "info")
+        fleet_config_data = load_config(str(fleet_config_path)) # This will be a dict, e.g., {"fleet": {...}}
+
+        # --- NEW: Load separate safety config ---
+        # --- FIX: Changed path to load from root /config directory ---
+        safety_config_path = config_dir / "safety_config.yaml"
+        # --- End of FIX ---
+        
+        if not Path(safety_config_path).exists():
+            logger.log(f"WARNING: {safety_config_path} not found. Safety monitor may not be configured.", "warning")
+            safety_config_data = {}
+        else:
+            logger.log(f"Loading safety config from {safety_config_path}...", "info")
+            safety_config_data = load_config(str(safety_config_path))
+        # --- End of NEW ---
+
+        # Merge them. The fleet and safety data is top-priority.
+        config = {**system_config, **fleet_config_data, **safety_config_data}
+        # --- END OF NEW LOADING LOGIC ---
+        
+        # --- NEW: Get role from fleet_config as single source of truth ---
+        fleet_config = config.get('fleet', {})
+        drone_config = fleet_config.get(args.id, {})
+        
+        drone_role = drone_config.get('role')
+        if not drone_role:
+            logger.log(f"CRITICAL: No 'role' defined for drone '{args.id}' in fleet_config.yaml.", "error")
+            raise ValueError(f"No 'role' defined for drone '{args.id}' in fleet_config.yaml.")
+        
+        # Get all unique, valid roles defined in the fleet config
+        valid_roles = list(set(
+            d.get('role') for d in fleet_config.values() if d.get('role')
+        ))
+        logger.log(f"Drone role identified as: '{drone_role}'", "info")
+        logger.log(f"All valid fleet roles: {valid_roles}", "info")
+        # --- End of FIX ---
+
+>>>>>>> Stashed changes
         # --- FIX: Pass valid_roles to the parser ---
         logger.log("Loading mission file...", "info")
         mission_data = load_mission_file(Path(args.mission))
@@ -662,6 +788,9 @@ async def main():
         except Exception as e:
             print(f"[Main] Error during cleanup: {e}")
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
@@ -672,8 +801,11 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
         print("\n[Main] Shutting down...")
 =======
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
         print("\n[Main] Interrupted")
@@ -681,6 +813,10 @@ if __name__ == "__main__":
         print(f"\n[Main] Fatal error: {e}")
         import sys
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
+        sys.exit(1)
+>>>>>>> Stashed changes
+=======
         sys.exit(1)
 >>>>>>> Stashed changes
 =======

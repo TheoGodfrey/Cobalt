@@ -1,5 +1,6 @@
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 # COBALT Fleet Configuration
 
 world:
@@ -39,6 +40,8 @@ mqtt:
 =======
 =======
 >>>>>>> Stashed changes
+=======
+>>>>>>> Stashed changes
 ## Fleet topology
 # Defines all drones the hub knows about.
 # The drone/main.py --id flag must match one of these.
@@ -69,6 +72,9 @@ fleet:
       - "camera_thermal"      # NEW: Added to satisfy thermal_detector
 
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
