@@ -4,6 +4,8 @@ import numpy as np
 import yaml
 import math
 import time
+import signal # <-- ADDED for Bug 4
+import platform # <-- ADDED for Bug 4
 
 # Core Infrastructure
 from core.bus import MessageBus
@@ -66,6 +68,32 @@ async def main():
     safety = SafetyMonitor(world)  # Safety Limits
     comms = Comms(args.id, bus)    # Radio
 
+    # --- Signal Handlers (Required for Bug 4 Fix) ---
+    def emergency_kill(signum, frame):
+        print(f"\n[Main] Signal {signum} received. Initiating emergency shutdown.")
+        if hal: hal.land() # Attempt a controlled landing
+        # Stop the asyncio loop for graceful exit
+        asyncio.get_running_loop().stop()
+        
+    def handle_rtl(signum, frame):
+        print(f"\n[Main] Signal {signum} received. Returning to Launch (RTL).")
+        if hal: hal.return_to_launch()
+
+    def handle_land(signum, frame):
+        print(f"\n[Main] Signal {signum} received. Landing Now (LAND).")
+        if hal: hal.land()
+
+    # --- Bug 4 Fix: Signal Registration (Replaced lines 68-79) ---
+    signal.signal(signal.SIGINT, emergency_kill)
+    signal.signal(signal.SIGTERM, emergency_kill)
+
+    if platform.system() != "Windows":
+        signal.signal(signal.SIGUSR1, handle_rtl)
+        signal.signal(signal.SIGUSR2, handle_land)
+        print("[Main] Listening for SIGUSR1 (RTL) and SIGUSR2 (LAND).")
+    else:
+        print("[Main] On Windows: Use MQTT commands for RTL/LAND (no SIGUSR signals)")
+        
     # ---------------------------------------------------------
     # SERVICE 1: Guidance (The Pilot)
     # Priority: HIGH. Must never block.
@@ -80,13 +108,30 @@ async def main():
             
             # A. Get Strict State
             state: DroneState = hal.get_state()
+
+            # --- BUG FIX 5: Manual Override Pause/Resume ---
+            if manager:
+                # 1. Detect MANUAL override and pause mission state
+                if state.mode == "MANUAL" and not manager.paused:
+                    manager.pause_mission("manual_override")
+                # 2. Detect GUIDED resume after manual override
+                elif state.mode == "GUIDED" and manager.paused:
+                    manager.resume_mission()
+            # -----------------------------------------------
             
             # B. Update Mission Triggers (Did we find it?)
-            if manager: manager.check_triggers(state)
+            # Skip mission checks if we are manually flown or paused
+            if manager and not manager.paused: 
+                manager.check_triggers(state)
             
             # C. Solve for Velocity
-            raw_cmd = solver.solve(state)
-            
+            if manager and not manager.paused:
+                # Mission is active: calculate command from solver
+                raw_cmd = solver.solve(state)
+            else:
+                # Mission is paused (MANUAL, or awaiting resume): command zero velocity
+                raw_cmd = np.zeros(3)
+                
             # D. Safety Filter (Dynamic Home & Geofence)
             safe_cmd = safety.filter_velocity(raw_cmd, state)
             
@@ -101,10 +146,13 @@ async def main():
                 batt=state.battery,
                 hdg=state.heading,
                 mode=state.mode,
-                phase=manager.current_phase_idx if manager else 0,
-                posture=manager.current_posture if manager else "none"
+                phase=manager.current_phase_idx if manager else 0
             )
-            await bus.publish("comms/send", {"topic": "fleet/telemetry", "payload": telem.model_dump()})
+            # Re-added 'posture' from the previously fixed version (Bug 3 context)
+            telem_dict = telem.model_dump()
+            telem_dict['posture'] = manager.current_posture if manager else "none"
+            
+            await bus.publish("comms/send", {"topic": "fleet/telemetry", "payload": telem_dict})
             
             # G. Heartbeat
             await bus.publish("system/heartbeat", {"service": "guidance"})
@@ -187,9 +235,24 @@ async def main():
         # Updates World State with detections from OTHER drones
         async def on_network_target(data):
             world.targets.update(data['pos'], data['label'], data['conf'])
+
+        # --- Handler for fleet position synchronization (Bug 3 Fix) ---
+        async def on_fleet_telemetry(data):
+            drone_id = data.get('id')
+            pos = data.get('pos') # List of floats
+            
+            # Skip my own telemetry
+            if drone_id and pos and (drone_id != args.id):
+                # We assume WorldState has 'fleet_positions' initialized
+                world.fleet_positions[drone_id] = np.array(pos)
+                print(f"[Fleet] Updated {drone_id} position: {pos}")
+        # ----------------------------------------------------------
             
         bus.subscribe("fleet/home", on_home_update)
         bus.subscribe("fleet/target", on_network_target)
+        # --- Subscribe to telemetry for swarm equation (Bug 3 Fix) ---
+        bus.subscribe("fleet/telemetry", on_fleet_telemetry)
+        # ----------------------------------------------------------
         
         while True:
             await bus.publish("system/heartbeat", {"service": "listener"})

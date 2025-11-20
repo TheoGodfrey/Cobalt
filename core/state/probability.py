@@ -27,7 +27,7 @@ class ProbabilityModel:
     def evolve(self, dt, drift_vector_ms=(0.0, 0.0, 0.0)):
         # --- FIX: Explicit Type Conversion ---
         # Handles both tuples (0,0,0) and numpy arrays safely to prevent crash
-        drift = np.array(drift_vector_ms, dtype=float)
+        drift = np.asarray(drift_vector_ms, dtype=np.float64).flatten()[:3]
         
         # Safety check for dimensionality
         if drift.shape != (3,):
